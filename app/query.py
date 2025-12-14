@@ -51,19 +51,30 @@ LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "your-model-name")
 
 # ==============================================================================
 
-def format_docs(docs, is_summary=False):
+def format_docs(docs):
     """
-    格式化检索结果，兼容细节碎片 (包含JSON metadata) 和宏观摘要。
-    [Fix] 优化 format_docs 以适应两种数据格式。
+    智能格式化：混合处理 '摘要(Summary)' 和 '原始片段(Fragment)'
     """
     formatted = []
     for i, doc in enumerate(docs):
         meta = doc.metadata.copy()
         score = meta.pop("relevance_score", 0)
         
-        # 1. 处理细节碎片 (包含复杂的 JSON metadata)
-        if not is_summary:
-            # 智能解析嵌套 JSON
+        # 判断是摘要还是原始片段 (通过 metadata 中的 level 字段)
+        # build_hierarchy.py 生成的摘要带有 "level": "summary"
+        is_summary = meta.get("level") == "summary"
+        
+        if is_summary:
+            # --- 格式 A: 摘要 ---
+            content = (
+                f"<summary_context id='S-{i+1}' score='{score:.4f}'>\n"
+                f"  <content>{doc.page_content}</content>\n"
+                f"  <note>This is a high-level summary of a story arc.</note>\n"
+                f"</summary_context>"
+            )
+        else:
+            # --- 格式 B: 原始片段 ---
+            # 尝试解析嵌套的 json 字符串
             for key, value in meta.items():
                 if isinstance(value, str) and (value.startswith("{") or value.startswith("[")):
                     try:
@@ -73,24 +84,12 @@ def format_docs(docs, is_summary=False):
             
             meta_json = json.dumps(meta, ensure_ascii=False, indent=2)
             content = (
-                f"<fragment id='{i+1}' score='{score:.4f}'>\n"
+                f"<evidence_fragment id='F-{i+1}' score='{score:.4f}'>\n"
                 f"  <content>\n{doc.page_content}\n  </content>\n"
                 f"  <metadata>\n{meta_json}\n  </metadata>\n"
-                f"</fragment>"
+                f"</evidence_fragment>"
             )
-        
-        # 2. 处理宏观摘要 (page_content 即摘要本身)
-        else:
-            # 摘要的 metadata 较简单，我们只保留关键信息
-            level = meta.get("level", "summary")
-            child_count = meta.get("count", 0)
             
-            content = (
-                f"<summary_topic id='{i+1}' score='{score:.4f}' level='{level}' child_count='{child_count}'>\n"
-                f"  <topic_summary>\n{doc.page_content}\n  </topic_summary>\n"
-                f"</summary_topic>"
-            )
-
         formatted.append(content)
         
     return "\n\n".join(formatted)
@@ -148,15 +147,26 @@ def main():
     # =========================================================
     # 1. 意图分类链 (Intent Classification Chain)
     # =========================================================
-    intent_template = """分析用户的查询，判断它是对剧情的“宏观总结”还是“细节追问”。
+    intent_template = """你是一个查询意图分析专家。请分析用户的关于《莲之空女学院》剧情的提问。
 
 【用户问题】：{query}
 
-【判断规则】：
-1. 宏观总结 (overview)：包含“概括”、“总结”、“大意”、“讲了什么”、“背景”等词，或询问主题/篇章内容。
-2. 细节追问 (specific)：询问具体角色、具体台词、具体时间、具体动作、或寻找语音文件ID。
+【分类定义】：
+1. **analysis (深度分析)**: 
+   - 询问角色之间的**关系、感情、态度**（如“吟子怎么看花帆”、“两人的关系变化”）。
+   - 询问**原因、动机、背景**（如“为什么要这么做”、“背后的含义”）。
+   - 询问**性格、评价、成长**。
+   - **绝大多数非纯事实检索的问题都应归为此类。**
 
-请只输出 'overview' 或 'specific'，不要包含任何其他解释。"""
+2. **overview (宏观概括)**: 
+   - 仅当用户明确要求“总结全文”、“概括某章大意”、“讲了什么故事”时。
+
+3. **fact (事实追问)**: 
+   - 询问极其具体的**时间、地点、次数、物品**（如“第几话哭了”、“吃的什么”、“ID是多少”）。
+   - 寻找具体的某句台词出处。
+
+请只输出其中一个标签：'analysis', 'overview', 或 'fact'。
+"""
     intent_prompt = ChatPromptTemplate.from_template(intent_template)
     intent_chain = intent_prompt | rewrite_llm | StrOutputParser()
 
@@ -250,75 +260,91 @@ def main():
     specific_answer_prompt = ChatPromptTemplate.from_template(specific_answer_template)
 
     # =========================================================
-    # 3. 宏观摘要路径 (Overview Path)
+    # 3. 融合生成 Prompt (Context Fusion)
     # =========================================================
-    summary_answer_template = """你是一个高阶剧情分析师。
-用户正在寻求对剧情的宏观概括。请基于以下检索到的【主题摘要片段】，用流畅的中文回答用户的问题。
+    fusion_answer_template = """你是一个精通《莲之空女学院》剧情的专家。
+为了回答用户的问题，我们为你提供了两个层面的信息：
+1. **<summary_context>**: 剧情的宏观摘要（提供背景、氛围和事件脉络）。
+2. **<evidence_fragment>**: 具体的对话和场景细节（提供直接证据和台词）。
 
-【主题摘要片段】：
-{context}
-
-【用户原问题】：
+【用户问题】：
 {original_question}
 
-【回答要求】：
-1. 侧重于宏观叙事、主要角色关系和核心事件，不要陷入细节。
-2. 严禁提及“片段”、“摘要”、“ID”等系统术语。
-"""
-    summary_answer_prompt = ChatPromptTemplate.from_template(summary_answer_template)
+【上下文信息】：
+{context}
 
+【回答要求】：
+1. **结构化回答**：先用宏观摘要定下基调，再引用具体片段的细节作为论据。
+2. **深度分析**：结合角色的具体台词（fragment）和当时的情境（summary），分析角色的心理活动。
+3. **引用规范**：如果引用了片段，请提及场景或时间；如果引用了摘要，可作为背景描述。
+4. 必须用**中文**回答。
+"""
+    fusion_answer_prompt = ChatPromptTemplate.from_template(fusion_answer_template)
 
     # --- 交互循环 ---
     while True:
         print("\n" + "="*50)
-        user_query = input("请提问 [q退出]: ")
+        user_query = input("🙋 请提问 (中文) [q退出]: ")
         if user_query.lower() in ['q', 'exit']: break
         
         try:
             # 1. 意图分类
-            print(f"正在分析意图...")
+            print(f"🤖 正在分析意图...", end="", flush=True)
             intent = intent_chain.invoke({"query": user_query}).strip().lower()
-            print(f"   分类结果: {intent}")
+            print(f"\r✅ 意图识别: 【{intent}】           ")
             
-            # --- 宏观概括路径 ---
-            if intent == 'overview' and summary_store:
-                
-                print("路由: 宏观摘要检索...")
-                # 在摘要集合中进行搜索
-                docs = summary_store.similarity_search(user_query, k=3)
-                context_str = format_docs(docs, is_summary=True)
-                
-                print("正在生成宏观回答...")
-                print("-" * 30)
-                final_chain = summary_answer_prompt | llm | StrOutputParser()
+            combined_docs = []
 
-            # --- 细节追问路径 (默认路径) ---
-            else:
-                if intent == 'overview' and not summary_store:
-                    print("宏观摘要未就绪，强制转为细节检索。")
+            # =================================================
+            # 🚀 策略 A: 深度分析 (Analysis) -> 双路检索融合
+            # =================================================
+            if 'analysis' in intent:
+                print("🔄 启动双路检索 (Dual-Path Retrieval)...")
                 
-                print(f"正在提取关键词...")
-                # 1. 执行重写
+                # Path 1: 查摘要 (获取背景)
+                if summary_store:
+                    print("   └── 正在提取宏观背景 (Summary)...")
+                    # 摘要不需要重写，直接用中文搜语义即可，取 Top 5
+                    summary_docs = summary_store.similarity_search(user_query, k=5)
+                    combined_docs.extend(summary_docs)
+                
+                # Path 2: 查细节 (获取证据)
+                print("   └── 正在挖掘细节证据 (Details)...")
                 jp_query = rewrite_chain.invoke({"question": user_query})
-                print(f"\r生成搜索词: {jp_query}")
-                
-                # 2. 执行检索 (用日文搜)
-                print(f"正在检索 (Hybrid + Rerank)...")
-                docs = compression_retriever.invoke(jp_query)
-                
-                if not docs:
-                    print("未找到相关剧情。")
-                    continue
-                    
-                # 3. 格式化上下文
-                context_str = format_docs(docs, is_summary=False)
-                
-                # 4. 生成回答 (用中文回)
-                print(f"正在生成回答...")
-                print("-" * 30)
-                final_chain = specific_answer_prompt | llm | StrOutputParser()
+                # 细节检索需要重写为日文
+                detail_docs = compression_retriever.invoke(jp_query)
+                # 我们取前 15 个细节，避免冲淡摘要的权重
+                combined_docs.extend(detail_docs[:15])
 
-            # 统一输出
+            # =================================================
+            # 📖 策略 B: 宏观概括 (Overview) -> 只查摘要
+            # =================================================
+            elif 'overview' in intent and summary_store:
+                print("🔍 检索宏观摘要...")
+                combined_docs = summary_store.similarity_search(user_query, k=10)
+
+            # =================================================
+            # 🔍 策略 C: 事实追问 (Fact) -> 只查细节
+            # =================================================
+            else: # fact 或 fallback
+                print("🔍 检索具体细节...")
+                jp_query = rewrite_chain.invoke({"question": user_query})
+                combined_docs = compression_retriever.invoke(jp_query)
+
+            # --- 统一生成环节 ---
+            if not combined_docs:
+                print("⚠️ 未找到相关信息。")
+                continue
+
+            # 格式化所有文档（自动处理混合类型）
+            context_str = format_docs(combined_docs)
+            
+            print(f"🤖 正在生成深度回答 (Context Size: {len(combined_docs)} chunks)...")
+            print("-" * 30)
+            
+            # 使用融合 Prompt
+            final_chain = fusion_answer_prompt | llm | StrOutputParser()
+            
             for chunk in final_chain.stream({
                 "context": context_str,
                 "original_question": user_query
