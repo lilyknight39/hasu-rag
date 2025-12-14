@@ -36,7 +36,7 @@
     3.  **LLM 摘要生成**: 调用 LLM 生成纯净的日文剧情摘要，支持**断点续传**模式，避免重复消耗 Token。
     4.  **存入**: 将摘要存入 `story_summary_store`，并标记层级。
 
-#### C. 智能问答管道 (Query Pipeline) [核心升级]
+#### C. 智能问答管道 (Query Pipeline)
 * **脚本**: `app/query.py`
 * **流程**:
     1.  **深度意图识别 (Intent Classification)**: 基于 LLM 的三元分类：
