@@ -266,7 +266,7 @@ def main():
 3. **展示证据**：既然用户看不到原文，你必须**复述**关键台词或动作描写作为证据，而不是只给一个结论。
 4. **如果未找到**：直接说“在当前检索到的剧情中未找到相关信息”。
 """
-    specific_answer_template = ChatPromptTemplate.from_template(specific_answer_template)
+    specific_answer_prompt = ChatPromptTemplate.from_template(specific_answer_template)
 
     # 融合生成 Prompt
     fusion_answer_template = """你是一个精通《莲之空女学院》剧情的专家。
@@ -289,7 +289,7 @@ def main():
 3. **结构化回答**：可以分点作答，但每一处的论据必须是具体的剧情描述，而非编号。
 4. 必须用**中文**回答。
 """
-    fusion_answer_template = ChatPromptTemplate.from_template(fusion_answer_template)
+    fusion_answer_prompt = ChatPromptTemplate.from_template(fusion_answer_template)
 
     # --- 交互循环 ---
     while True:
