@@ -1,7 +1,7 @@
 # Hasu RAG: 链接！ 喜欢！ 爱生活！ 剧情智能分层问答系统
 
-这是一个基于 **LangChain**、**Qdrant** 和 **Xinference** 构建的高级 RAG（检索增强生成）系统。
-本项目专门针对长篇剧情/剧本数据进行了深度优化，实现了**混合检索 (Hybrid Search)**、**时间序聚类 (Time-Aware Clustering)** 和 **分层摘要索引 (RAPTOR-like Hierarchy)**，能够同时应对“微观细节追问”和“宏观剧情概括”两类用户查询。
+这是一个基于 **LangChain v1.x**、**Qdrant** 和 **Xinference** 构建的高级 RAG（检索增强生成）系统。
+本项目专门针对长篇剧情/剧本数据进行了深度优化，实现了**混合检索 (Hybrid Search)**、**带约束的时间序聚类 (Time-Constrained Clustering)** 和 **双路上下文融合 (Dual-Path Context Fusion)**，能够同时应对“微观细节追问”、“宏观剧情概括”以及“深度剧情分析”三类用户查询。
 
 ---
 
@@ -16,38 +16,37 @@
 | 集合名称 | 数据层级 | 存储内容 | 检索模式 | 典型用途 |
 | :--- | :--- | :--- | :--- | :--- |
 | **`story_knowledge_base`** | **微观层 (Raw Fragments)** | 原始剧情切片，包含完整的台词、场景、时间元数据。 | **Hybrid (Dense + Sparse)** | “梢在哪一话哭了？“<br>“花帆最喜欢的食物是什么？” |
-| **`story_summary_store`** | **宏观层 (Cluster Summaries)** | 经过聚类生成的剧情摘要，涵盖不同时间跨度的事件概括。 | **Dense Only** | “第10话讲了什么故事？”<br>“103期故事中有什么重大转折？” |
+| **`story_summary_store`** | **宏观层 (Cluster Summaries)** | 经过聚类生成的剧情摘要，涵盖不同时间跨度的事件概括。 | **Dense Only** | “第10话讲了什么故事？”<br>“吟子对花帆的感情变化是怎样的？” |
 
 ### 2. 核心工作流
 
 #### A. 数据入库 (Ingestion)
-*   **脚本**: `app/ingest.py`
-*   **逻辑**:
-    1.  读取 `data/stories.json` 中的剧情数据。
-    2.  利用 **Xinference (bge-m3)** 生成稠密向量 (Dense Embeddings) 用于语义匹配。
-    3.  利用 **Qdrant (BM25)** 生成稀疏向量 (Sparse Embeddings) 用于关键词精确匹配（如人名、特定术语）。
+* **脚本**: `app/ingest.py` (全量) / `app/ingest_append.py` (增量)
+* **逻辑**:
+    1.  读取剧情数据，支持增量追加（基于 UUID5 去重）。
+    2.  利用 **Xinference (bge-m3)** 生成稠密向量 (Dense Embeddings)。
+    3.  利用 **FastEmbed (BM25)** 生成稀疏向量 (Sparse Embeddings) 用于关键词精确匹配。
     4.  存入 `story_knowledge_base`。
 
 #### B. 分层索引构建 (Hierarchy Building)
-*   **脚本**: `app/build_hierarchy.py`
-*   **算法思路 (RAPTOR over Time)**:
-    1.  **加载数据**: 从底层知识库加载所有剧情碎片。
-    2.  **时间序约束聚类**: 使用 `AgglomerativeClustering`，但引入时间/话号约束，强制只聚合相邻或相近的剧情块，防止跨时间线的错误归纳。
-    3.  **LLM 摘要生成**: 对聚类后的文本块调用 LLM 生成日文剧情摘要。
-    4.  **递归构建**: 将生成的摘要视为新的节点，重复聚类过程，形成树状结构。
-    5.  **存入**: 将所有摘要存入 `story_summary_store`。
+* **脚本**: `app/build_hierarchy.py`
+* **算法思路 (Time-Constrained Agglomerative Clustering)**:
+    1.  **加载与排序**: 加载所有碎片并严格按剧情时间线排序。
+    2.  **连接性约束聚类**: 使用 `AgglomerativeClustering` 配合 `kneighbors_graph`，强制只聚合在时间上相邻的剧情块，**杜绝跨时间线的错误归纳**。
+    3.  **LLM 摘要生成**: 调用 LLM 生成纯净的日文剧情摘要，支持**断点续传**模式，避免重复消耗 Token。
+    4.  **存入**: 将摘要存入 `story_summary_store`，并标记层级。
 
-#### C. 智能问答管道 (Query Pipeline)
-*   **脚本**: `app/query_smart.py`
-*   **流程**:
-    1.  **意图识别 (Intent Classification)**: 分析用户问题是 `overview` (概括) 还是 `specific` (细节)。
-    2.  **智能路由 (Routing)**:
-        *   **Overview**: 直接检索 `story_summary_store`，获取宏观上下文，生成回答。
-        *   **Specific**:
-            *   **Query Rewrite**: 将中文问题翻译为日文，并自动扩展同义词（如“哭” -> “泣く, 涙, 号泣”），修正角色称呼。
-            *   **Hybrid Retrieval**: 并行执行 Dense 和 Sparse 检索，在 Qdrant 内部进行互惠排序融合 (RRF)。
-            *   **Rerank**: 使用 Xinference Rerank 模型对前 150 条结果进行精排，选出 Top N。
-            *   **Generation**: 基于精选片段生成中文回答。
+#### C. 智能问答管道 (Query Pipeline) [核心升级]
+* **脚本**: `app/query.py`
+* **流程**:
+    1.  **深度意图识别 (Intent Classification)**: 基于 LLM 的三元分类：
+        * `fact`: 事实追问（时间、地点、物品）。
+        * `overview`: 纯宏观概括。
+        * `analysis`: **深度分析**（如角色关系、情感动机、性格评价）。
+    2.  **动态路由与融合 (Routing & Fusion)**:
+        * **Fact 模式**: 单路检索原始库。利用 **Query Rewrite** 自动扩展同义词（如“哭” -> “泣く, 涙, 号泣”），并大幅提升 Top-K 窗口以优化计数类问题召回率。
+        * **Overview 模式**: 单路检索摘要库。
+        * **Analysis 模式 (Dual-Path)**: **同时**检索摘要库（获取背景与氛围）和原始库（获取具体台词证据），通过 `Context Fusion` 模板将宏观与微观信息拼接，生成有理有据的深度回答。
 
 ---
 
@@ -56,26 +55,27 @@
 ```text
 .
 ├── app/
-│   ├── build_hierarchy.py     # 分层索引构建主脚本 (RAPTOR)
-│   ├── diagnostic.py          # Qdrant 连接诊断工具
-│   ├── evaluate.py            # 检索效果评估工具 (Review mode)
+│   ├── build_hierarchy.py     # 分层索引构建主脚本 (支持断点续传/覆盖)
 │   ├── ingest.py              # 全量数据入库脚本 (会清空旧数据)
-│   ├── ingest_append.py       # 增量数据入库脚本
-│   ├── query_smart.py         # 核心问答启动脚本
+│   ├── ingest_append.py       # 增量数据入库脚本 (幂等追加)
+│   ├── query.py               # [入口] 核心智能问答启动脚本
 │   ├── reranker.py            # 自定义 Rerank 组件封装
-│   ├── visualize_clusters.py  # 聚类效果可视化工具
-│   └── visualize_interactive.py # 生成交互式剧情地图
+│   ├── visualize_clusters.py  # 生成静态时间线聚类图 (PNG)
+│   └── visualize_interactive.py # 生成交互式剧情地图 (HTML)
 ├── data/
-│   ├── stories.json           # 原始数据源 (需自行准备)
-│   └── new_stories.json       # 增量数据源 (需自行准备)
+│   ├── stories.json           # 原始数据源
+│   └── new_stories.json       # 增量数据源示例
 ├── qdrant_storage/            # Qdrant 本地数据持久化目录
-├── docker-compose.yml         # Qdrant 服务编排 (可选)
 └── requirements.txt           # Python 依赖
 ```
 
 ### 可视化分析
 
-项目包含用于验证聚类效果的可视化脚本。下图展示了剧情在时间线上的聚类分布 (`app/build_hierarchy.py` 的产出效验)：
+项目包含用于验证聚类效果的可视化脚本，用于验证算法是否正确捕捉了剧情的时间流动：
+    1. 静态时间线 (visualize_clusters.py): 生成彩虹色谱的轨迹图，验证聚类的时间连续性。
+    2. 交互式地图 (visualize_interactive.py): 生成 HTML 文件，支持鼠标悬停查看具体的场景ID、出场角色和剧情预览，用于深度调试数据质量。
+
+下图展示了剧情在时间线上的聚类分布 (`app/build_hierarchy.py` 的产出效验)：
 
 ![Cluster Timeline Analysis](app/cluster_timeline.png)
 
@@ -103,10 +103,11 @@ pip install -r app/requirements.txt
 
 ```bash
 export QDRANT_URL="http://localhost:6333"
-export XINFERENCE_SERVER_URL="http://your-xinference-server:9997"
-# LLM 配置 (适配 OpenAI 接口)
-export LLM_BASE_URL="..."
-export LLM_API_KEY="..."
+export XINFERENCE_SERVER_URL="http://your-server:9997"
+# LLM 配置 (OpenAI 协议兼容)
+export LLM_BASE_URL="http://your-server:9001/v1"
+export LLM_API_KEY=""
+export LLM_MODEL_NAME=""
 ```
 
 ### 3. 数据流程
@@ -117,16 +118,23 @@ export LLM_API_KEY="..."
 python app/ingest.py
 ```
 
-**Step 2. 构建分层摘要索引** (此步耗时较长，视数据量而定)
+**Step 2. 构建分层摘要索引** (此步耗时较长，视数据量而定，支持中断后继续运行)
 
 ```bash
 python app/build_hierarchy.py
 ```
 
-**Step 3. 启动问答系统**
+**Step 3. (可选) 生成可视化报表**
 
 ```bash
-python app/query_smart.py
+python app/visualize_interactive.py
+# 结果将保存为 interactive_timeline.html
+```
+
+**Step 4. 启动问答系统**
+
+```bash
+python app/query.py
 ```
 
 ---
