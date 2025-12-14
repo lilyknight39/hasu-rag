@@ -1,0 +1,53 @@
+# LangChain v1.x RAG
+# 适配环境: Xinference + Qdrant (Docker)
+
+# --- 核心编排层 (Orchestration) ---
+# 包含 ContextualCompressionRetriever 等高级检索组件
+langchain>=1.1.3
+
+# --- 基础接口层 (Core Interface) ---
+# 必须 >=0.3.10 以完全支持 Pydantic v2，v1.x 类型安全基石
+langchain-core>=0.3.10
+
+# --- 社区组件层 (Community Integrations) ---
+# 包含 XinferenceEmbeddings 等标准集成
+langchain-community>=0.3.0
+
+# --- 向量数据库适配层 (Vector Store) ---
+# [CRITICAL] v1.x 必须使用此独立包，修复了异步初始化死锁和 search 方法缺失问题
+langchain-qdrant>=0.1.4
+
+# --- 数据库客户端 (DB Client) ---
+# 支持混合检索 (Hybrid Search) 和服务端 RRF 融合
+qdrant-client>=1.12.0
+
+# --- 稀疏向量生成 (Sparse Vector) ---
+# [RECOMMENDED] 用于生成稀疏向量 (SPLADE/BM25)，本地 CPU 运行
+fastembed>=0.4.0
+
+# --- 模型服务支持 (Model Services) ---
+# 1. Xinference 官方客户端：LangChain 的 XinferenceEmbeddings 底层依赖
+xinference-client>=0.11.0
+# 2. OpenAI 协议适配：用于 Chat 模型调用
+langchain-openai>=0.2.0
+
+# --- 数据科学与聚类 (Clustering & Analysis) ---
+# 用于 RAPTOR 分层索引构建 (K-Means, Agglomerative Clustering, t-SNE)
+scikit-learn>=1.3.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# --- 可视化 (Visualization) ---
+# 用于生成静态散点图和交互式 HTML 时间线
+matplotlib>=3.7.0
+plotly>=5.18.0
+
+# --- 基础工具与网络 (Utilities) ---
+# 用于自定义 HTTP Reranker
+requests>=2.31.0
+# 计算 Token 数量
+tiktoken>=0.7.0
+# 环境变量管理
+python-dotenv>=1.0.0
+# 强制 Pydantic v2，确保数据验证性能
+pydantic>=2.5.0

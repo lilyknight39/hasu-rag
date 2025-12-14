@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  # 向量数据库服务
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant-db
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: always
+
+  # 你的应用运行环境
+  app:
+    image: python:3.11-slim
+    container_name: langchain-app
+    working_dir: /app
+    volumes:
+      - ./app:/app
+      - ./data:/data
+    # 保持容器运行，以便我们可以进入容器执行命令
+    command: tail -f /dev/null
+    env_file:
+      - .env
+    depends_on:
+      - qdrant

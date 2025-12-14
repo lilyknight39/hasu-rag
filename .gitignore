@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.venv/
+data/*.json
+qdrant_storage/
+app/interactive_timeline.html
