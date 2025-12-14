@@ -179,10 +179,7 @@ def main():
     intent_chain = intent_prompt | rewrite_llm | StrOutputParser()
 
     # 2. 细节检索路径 (Specific Path)
-    
-    # 查询重写 Prompt (与你提供的最新版一致)
-    rewrite_template = """你是一个专为 **RAG 混合检索系统 (Hybrid Search)** 设计的查询优化专家。... [此处省略，逻辑与你提供的最新版本一致]"""
-    # ... (将最新的 rewrite_template 放到这里)
+    # 查询重写 Prompt
     rewrite_template = """你是一个专为 **RAG 混合检索系统 (Hybrid Search)** 设计的查询优化专家。
 该系统的下游包含两个检索引擎，你需要构造一个能同时满足它们需求的日文查询语句：
 
