@@ -44,7 +44,7 @@ RAW_COLLECTION_NAME = "story_knowledge_base"  # 细节碎片
 SUMMARY_COLLECTION_NAME = "story_summary_store" # 宏观摘要
 SPARSE_VECTOR_NAME = "langchain-sparse"
 
-# 3. 生成后端 (Gemini Proxy)
+# 3. 生成后端 (LLM)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.example.com/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "your-")
@@ -54,40 +54,50 @@ LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "your-")
 def format_docs(docs):
     """
     智能格式化：混合处理 '摘要(Summary)' 和 '原始片段(Fragment)'
+    [优化]: 移除对 LLM 诱导性强的 F-x ID，改用语义化标签
     """
     formatted = []
     for i, doc in enumerate(docs):
         meta = doc.metadata.copy()
         score = meta.pop("relevance_score", 0)
         
-        # 判断是摘要还是原始片段 (通过 metadata 中的 level 字段)
-        # build_hierarchy.py 生成的摘要带有 "level": "summary"
+        # 判断是摘要还是原始片段
         is_summary = meta.get("level") == "summary"
         
         if is_summary:
             # --- 格式 A: 摘要 ---
             content = (
-                f"<summary_context id='S-{i+1}' score='{score:.4f}'>\n"
+                f"<summary_section index='{i+1}'>\n" # 移除 id='S-x'，改用 index
                 f"  <content>{doc.page_content}</content>\n"
-                f"  <note>This is a high-level summary of a story arc.</note>\n"
-                f"</summary_context>"
+                f"</summary_section>"
             )
         else:
             # --- 格式 B: 原始片段 ---
-            # 尝试解析嵌套的 json 字符串
+            # 1. 解析 Metadata
             for key, value in meta.items():
                 if isinstance(value, str) and (value.startswith("{") or value.startswith("[")):
-                    try:
-                        meta[key] = json.loads(value)
-                    except:
-                        pass
+                    try: meta[key] = json.loads(value)
+                    except: pass
             
+            # 2. 提取更可读的场景信息，替代冷冰冰的 ID
+            # 尝试获取场景名、时间或地点，组合成一个 readable_source
+            scene_id = meta.get('scene', 'Unknown_Scene')
+            location = meta.get('loc', '') or meta.get('location', '')
+            
+            # 构造一个给 LLM 看的“来源标签”，例如：[场景: story_main_... | 地点: 练习室]
+            # 这样 LLM 就算引用，也会引用成 "在练习室的场景中..."
+            source_tag = f"Scene: {scene_id}"
+            if location:
+                source_tag += f", Location: {location}"
+
             meta_json = json.dumps(meta, ensure_ascii=False, indent=2)
+            
             content = (
-                f"<evidence_fragment id='F-{i+1}' score='{score:.4f}'>\n"
+                f"<story_fragment sequence='{i+1}'>\n" # 移除 id='F-x'
+                f"  <source_info>{source_tag}</source_info>\n" # 显式告诉 LLM 这是什么场景
                 f"  <content>\n{doc.page_content}\n  </content>\n"
                 f"  <metadata>\n{meta_json}\n  </metadata>\n"
-                f"</evidence_fragment>"
+                f"</story_fragment>"
             )
             
         formatted.append(content)
@@ -144,9 +154,7 @@ def main():
         streaming=False
     )
     
-    # =========================================================
     # 1. 意图分类链 (Intent Classification Chain)
-    # =========================================================
     intent_template = """你是一个查询意图分析专家。请分析用户的关于《莲之空女学院》剧情的提问。
 
 【用户问题】：{query}
@@ -170,9 +178,7 @@ def main():
     intent_prompt = ChatPromptTemplate.from_template(intent_template)
     intent_chain = intent_prompt | rewrite_llm | StrOutputParser()
 
-    # =========================================================
     # 2. 细节检索路径 (Specific Path)
-    # =========================================================
     
     # 查询重写 Prompt (与你提供的最新版一致)
     rewrite_template = """你是一个专为 **RAG 混合检索系统 (Hybrid Search)** 设计的查询优化专家。... [此处省略，逻辑与你提供的最新版本一致]"""
@@ -242,30 +248,31 @@ def main():
     )
 
     # 细节生成 Prompt
-    specific_answer_template = """你是一个精通《莲之空女学院》剧情的 AI 助手。
-请仔细阅读以下检索到的【日文剧情片段】，并用**中文**回答用户的问题。
+    specific_answer_template = """你是一个精通《莲之空女学院》剧情的 AI 剧情分析师。
+请阅读以下剧情片段，回答用户的问题。
 
 【剧情片段】：
 {context}
 
-【用户原问题】：
+【用户问题】：
 {original_question}
 
 【回答要求】：
-1. 基于日文片段的内容进行推理，但**必须用中文回答**。
-2. 沉浸式回答：请直接以“剧情专家”的身份回答，**严禁**在回答中提及“片段ID”、“XML结构”或“根据提供的JSON数据”。
-3. 准确引用：如果需要指出具体出处，请使用元数据中的 `scene` (场景ID) 或 时间/地点。
-4. 如果检索结果中没有相关内容，请直接说“在当前检索到的剧情中未找到”，不要编造。
+1. **完全融合式写作**：请将检索到的剧情细节**融合**在你的分析中，**绝对不要**出现 "F-1", "F-2", "片段X", "story_main_xxx" 这样的机械索引或文件名。
+2. **自然引用**：
+   - ❌ 错误示范：根据 F-6，瑠璃说大家变了。
+   - ✅ 正确示范：在俱乐部发生变化的时期（story_main_10500701_scene_005），瑠璃曾对姬芽表示“大家都不在了，感觉都变了”，这体现了...
+   - ✅ 正确示范：当两人在钓鱼场独处时（场景：钓鱼），姬芽提到了...
+3. **展示证据**：既然用户看不到原文，你必须**复述**关键台词或动作描写作为证据，而不是只给一个结论。
+4. **如果未找到**：直接说“在当前检索到的剧情中未找到相关信息”。
 """
-    specific_answer_prompt = ChatPromptTemplate.from_template(specific_answer_template)
+    specific_answer_template = ChatPromptTemplate.from_template(specific_answer_template)
 
-    # =========================================================
-    # 3. 融合生成 Prompt (Context Fusion)
-    # =========================================================
+    # 融合生成 Prompt
     fusion_answer_template = """你是一个精通《莲之空女学院》剧情的专家。
 为了回答用户的问题，我们为你提供了两个层面的信息：
-1. **<summary_context>**: 剧情的宏观摘要（提供背景、氛围和事件脉络）。
-2. **<evidence_fragment>**: 具体的对话和场景细节（提供直接证据和台词）。
+1. **<summary_context>**: 剧情的宏观摘要。
+2. **<evidence_fragment>**: 具体的对话和场景细节。
 
 【用户问题】：
 {original_question}
@@ -274,12 +281,15 @@ def main():
 {context}
 
 【回答要求】：
-1. **结构化回答**：先用宏观摘要定下基调，再引用具体片段的细节作为论据。
-2. **深度分析**：结合角色的具体台词（fragment）和当时的情境（summary），分析角色的心理活动。
-3. **引用规范**：如果引用了片段，请提及场景或时间；如果引用了摘要，可作为背景描述。
+1. **深度分析与融合**：先用宏观摘要定下基调，再**直接引用**具体片段中的台词或动作细节作为论据。
+2. **隐形引用**：
+   - **严禁**使用 "F-X", "S-X", "ID:xxx" 这种计算机术语。
+   - 请使用“在...场景中”、“当...的时候”、“正如...所说”这种自然的叙述方式来引用来源。
+   - **必须复述内容**：不要说“如 F-1 所述”，要说“正如之前提到的姬芽失去挚友的经历...”。
+3. **结构化回答**：可以分点作答，但每一处的论据必须是具体的剧情描述，而非编号。
 4. 必须用**中文**回答。
 """
-    fusion_answer_prompt = ChatPromptTemplate.from_template(fusion_answer_template)
+    fusion_answer_template = ChatPromptTemplate.from_template(fusion_answer_template)
 
     # --- 交互循环 ---
     while True:
