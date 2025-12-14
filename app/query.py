@@ -174,6 +174,7 @@ def main():
    - 寻找具体的某句台词出处。
 
 请只输出其中一个标签：'analysis', 'overview', 或 'fact'。
+若用户在问题中明确指定 analysis、overview、fact，优先使用该标签。
 """
     intent_prompt = ChatPromptTemplate.from_template(intent_template)
     intent_chain = intent_prompt | rewrite_llm | StrOutputParser()
@@ -272,7 +273,7 @@ def main():
    - ❌ **错误示范**：
      - “根据 F-1，她们吵架了。”
      - “参考摘要 section 2...”
-   - *注：可以保留具体的 Scene ID (如 story_main_... ) 以便溯源，但要嵌入在自然语句中。*
+   - *注：若提及片段，**可以**保留具体的 Scene ID (如 story_main_... ) 以便溯源，但要嵌入在自然语句中。*
 
 3. **结构化回答**：
    - 逻辑清晰，观点明确。
