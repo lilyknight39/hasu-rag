@@ -51,3 +51,11 @@ tiktoken>=0.7.0
 python-dotenv>=1.0.0
 # 强制 Pydantic v2，确保数据验证性能
 pydantic>=2.5.0
+
+# --- API 服务器 (API Server) ---
+# FastAPI 框架
+fastapi>=0.104.0
+# ASGI 服务器
+uvicorn[standard]>=0.24.0
+# YAML 配置解析
+pyyaml>=6.0.0
