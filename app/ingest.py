@@ -23,6 +23,24 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "story_knowledge_base")
 # 定义稀疏向量的默认名称 (LangChain 默认使用这个名字)
 SPARSE_VECTOR_NAME = "langchain-sparse"
 
+def resolve_data_file() -> str:
+    """
+    尝试解析数据文件位置，优先使用环境变量，其次使用容器与本地的默认路径。
+    这样无论在 Docker（/data）还是本地直接运行（data/）都能找到文件。
+    """
+    candidates = [
+        os.getenv("DATA_FILE", "").strip(),
+        "/data/optimized_final.json",
+        "data/optimized_final.json",
+        "/data/stories.json",  # 兼容旧路径
+        "data/stories.json",
+    ]
+    candidates = [p for p in candidates if p]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(f"未找到可用的数据文件，请检查是否存在: {', '.join(candidates)}")
+
 def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -102,9 +120,11 @@ def main():
 
     # 3. 加载数据
     try:
-        docs, ids = load_data_with_ids("/data/stories.json")
+        data_path = resolve_data_file()
+        print(f"📂 数据文件: {data_path}")
+        docs, ids = load_data_with_ids(data_path)
     except Exception as e:
-        print(f"❌ JSON 解析失败: {e}")
+        print(f"❌ 读取或解析数据失败: {e}")
         return
 
     print(f"📄 准备写入 {len(docs)} 条数据...")

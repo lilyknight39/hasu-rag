@@ -68,8 +68,9 @@
 │   ├── visualize_clusters.py  # 生成静态时间线聚类图 (PNG)
 │   └── visualize_interactive.py # 生成交互式剧情地图 (HTML)
 ├── data/
-│   ├── stories.json           # 原始数据源
-│   └── new_stories.json       # 增量数据源示例
+│   ├── optimized_final.json   # 已清洗的主数据集（默认全量入库使用）
+│   ├── stories.json           # 旧版原始数据源（可选）
+│   └── new_stories.json       # 增量数据源示例（可自定义）
 ├── qdrant_storage/            # Qdrant 本地数据持久化目录
 └── requirements.txt           # Python 依赖
 ```
@@ -96,7 +97,15 @@ export LLM_API_KEY=""
 export LLM_MODEL_NAME=""
 ```
 
-### 3. 数据流程
+### 3. 数据文件
+默认全量入库读取 `data/optimized_final.json`。如需自定义路径，可设置：
+
+```bash
+export DATA_FILE="/path/to/your_full_data.json"      # 全量入库使用
+export APPEND_DATA_FILE="/path/to/your_new_data.json" # 增量入库使用
+```
+
+### 4. 数据流程
 ```bash
 # 1. 初始化原始知识库
 python app/ingest.py
@@ -105,7 +114,7 @@ python app/ingest.py
 python app/build_hierarchy.py
 ```
 
-### 4. 启动服务 (二选一)
+### 5. 启动服务 (二选一)
 
 *   **交互式命令行模式**:
     ```bash

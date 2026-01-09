@@ -20,6 +20,24 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "story_knowledge_base")
 SPARSE_VECTOR_NAME = "langchain-sparse" # 必须与建表时一致
 
+def resolve_default_append_path() -> str:
+    """
+    选择一个实际存在的默认数据路径，避免用户直接回车后指向不存在的文件。
+    优先使用环境变量，其次尝试增量示例文件，再回退到当前可用的全量文件。
+    """
+    candidates = [
+        os.getenv("APPEND_DATA_FILE", "").strip(),
+        "/data/new_stories.json",
+        "data/new_stories.json",
+        "/data/optimized_final.json",
+        "data/optimized_final.json",
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    # 如果都不存在，保留旧默认值，后续会有明确报错
+    return "/data/new_stories.json"
+
 def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
     """
     加载数据逻辑保持不变，确保 ID 生成算法一致 (UUID5)，
@@ -76,10 +94,15 @@ def main():
         return
 
     # 2. 输入新数据路径
-    default_path = "/data/new_stories.json"
+    default_path = resolve_default_append_path()
     file_path = input(f"📂 请输入新数据文件路径 [默认: {default_path}]: ").strip()
     if not file_path:
         file_path = default_path
+    
+    if not os.path.exists(file_path):
+        print(f"❌ 找不到文件: {file_path}")
+        print("   请确认路径，或设置 APPEND_DATA_FILE 指向正确的数据文件。")
+        return
 
     # 3. 初始化模型 (Dense + Sparse)
     print("🔌 初始化 Embeddings (Xinference + FastEmbed)...")
