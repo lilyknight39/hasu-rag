@@ -45,10 +45,22 @@ def fetch_all_vectors(client, collection_name):
             break
         offset = next_offset
     
-    # [关键] 必须按 ID 或时间排序，否则聚类会乱
-    # 假设 ID 是有序的 UUIDv5 或者入库时已有序
-    # 如果 metadata 里有 timestamp，最好用 metadata 排序
-    points.sort(key=lambda p: p.id)
+    # [关键] 按时间顺序排序：优先使用 metadata.order，其次 scene/id
+    def sort_key(p):
+        payload = p.payload or {}
+        meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else payload
+        order = meta.get("order")
+        if order is not None:
+            try:
+                return (0, int(order))
+            except Exception:
+                return (0, str(order))
+        scene = meta.get("scene") or meta.get("scene_id") or meta.get("id")
+        if scene:
+            return (1, str(scene))
+        return (2, str(p.id))
+
+    points.sort(key=sort_key)
     
     print(f"✅ 合計 {len(points)} 個の断片を取得しました。")
     return points

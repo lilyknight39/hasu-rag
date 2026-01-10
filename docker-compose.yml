@@ -6,7 +6,8 @@ services:
     ports:
       - "6333:6333"
     volumes:
-      - qdrant_storage:/qdrant/storage
+      # 持久化到宿主机本地目录 ./qdrant_storage
+      - ./qdrant_storage:/qdrant/storage
     restart: always
 
   # 你的应用运行环境
@@ -14,6 +15,8 @@ services:
     image: python:3.11-slim
     container_name: langchain-app
     working_dir: /app
+    ports:
+      - "8217:8217"
     volumes:
       - ./app:/app
       - ./data:/data
@@ -22,6 +25,3 @@ services:
     command: sh -c "pip install --no-cache-dir -r /app/requirements.txt && tail -f /dev/null"
     depends_on:
       - qdrant
-
-volumes:
-  qdrant_storage:

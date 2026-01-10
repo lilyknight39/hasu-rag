@@ -32,8 +32,22 @@ def fetch_data(client):
             break
         offset = next_offset
         
-    # 按 ID 排序
-    points.sort(key=lambda p: p.id) 
+    # 按时间顺序排序：优先 metadata.order，其次 scene/id
+    def sort_key(p):
+        payload = p.payload or {}
+        meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else payload
+        order = meta.get("order")
+        if order is not None:
+            try:
+                return (0, int(order))
+            except Exception:
+                return (0, str(order))
+        scene = meta.get("scene") or meta.get("scene_id") or meta.get("id")
+        if scene:
+            return (1, str(scene))
+        return (2, str(p.id))
+
+    points.sort(key=sort_key) 
     
     vectors_list = []
     meta_list = []

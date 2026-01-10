@@ -30,10 +30,8 @@ def resolve_data_file() -> str:
     """
     candidates = [
         os.getenv("DATA_FILE", "").strip(),
-        "/data/optimized_final.json",
-        "data/optimized_final.json",
-        "/data/stories.json",  # 兼容旧路径
-        "data/stories.json",
+        "/data/timeline_flow_optimized.json",
+        "data/timeline_flow_optimized.json",
     ]
     candidates = [p for p in candidates if p]
     for path in candidates:
@@ -51,27 +49,60 @@ def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
     
     print(f"📊 正在解析 {len(data)} 条数据...")
 
-    for item in data:
-        raw_meta = item.get("metadata", {}).copy()
-        
-        processed_meta = {
-            "scene": raw_meta.get("scene_id", "unknown"),
-            "chars": raw_meta.get("characters", []),
-            "time": raw_meta.get("time_period", ""),
-            "loc": raw_meta.get("location", ""),
-            "source": raw_meta.get("source_file", ""),
-            "dialogues": json.dumps(raw_meta.get("dialogues", []), ensure_ascii=False)
-        }
-        
-        raw_id = item.get("chunk_id")
+    def _normalize_text(item: dict) -> str:
+        """优先使用新格式里的 text 字段，不存在时回退到 script 列表。"""
+        if item.get("text"):
+            return item["text"]
+        script = item.get("script", [])
+        if isinstance(script, list) and script:
+            lines = []
+            for turn in script:
+                speaker = turn.get("c")
+                text = turn.get("t", "")
+                prefix = f"{speaker}: " if speaker else ""
+                lines.append(f"{prefix}{text}")
+            return "\n".join(lines)
+        return item.get("content", "")
+
+    for order_idx, item in enumerate(data):
+        ctx = item.get("ctx") or {}
+        stats = item.get("stats") or {}
+        timeline = item.get("timeline") or {}
+
+        raw_id = item.get("id") or item.get("scene")
         if raw_id:
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_id))
-            processed_meta["id"] = raw_id
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(raw_id)))
         else:
             point_id = str(uuid.uuid4())
-            
+            raw_id = ""
+
+        processed_meta = {
+            "scene": item.get("scene") or raw_id or "unknown",
+            "id": raw_id,
+            "source": item.get("src", ""),
+            "order": order_idx,  # 保留原始时间顺序
+            "chars": ctx.get("chars") or [],
+            "voices": ctx.get("voices") or [],
+            "loc": ctx.get("loc"),
+            "time": ctx.get("time"),
+            "bgm": ctx.get("bgm", ""),
+            "type": ctx.get("type", ""),
+            "stats": stats,
+            "timeline": timeline,
+            "act": ctx.get("act") or {},
+            "emo": ctx.get("emo") or {},
+            "state_act": ctx.get("state_act") or {},
+            "state_emo": ctx.get("state_emo") or {},
+            "state": ctx.get("state"),
+            "weather": ctx.get("weather"),
+            "merged_from": item.get("merged_from") or [],
+            # 保留原始脚本以避免信息丢失（含 t/c/v/kf 等）
+            "script": item.get("script", []),
+        }
+
+        content = _normalize_text(item)
         ids.append(point_id)
-        docs.append(Document(page_content=item.get("content"), metadata=processed_meta))
+        docs.append(Document(page_content=content, metadata=processed_meta))
         
     return docs, ids
 

@@ -30,11 +30,22 @@ def fetch_vectors(client):
             break
         offset = next_offset
         
-    # [关键] 必须按 ID/时间排序，否则时间约束聚类会失效
-    # 假设你的 ID 是有序的，或者是 UUID 但入库顺序是对的
-    # 如果 metadata 里有 scene_id 或 time，最好用那个排序
-    # points.sort(key=lambda p: p.payload.get('scene', '')) 
-    points.sort(key=lambda p: p.id) 
+    # [关键] 必须按时间顺序排序，否则时间约束聚类会失效
+    def sort_key(p):
+        payload = p.payload or {}
+        meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else payload
+        order = meta.get("order")
+        if order is not None:
+            try:
+                return (0, int(order))
+            except Exception:
+                return (0, str(order))
+        scene = meta.get("scene") or meta.get("scene_id") or meta.get("id")
+        if scene:
+            return (1, str(scene))
+        return (2, str(p.id))
+
+    points.sort(key=sort_key) 
 
     vectors_list = []
     for p in points:
