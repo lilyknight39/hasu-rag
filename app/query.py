@@ -1,6 +1,12 @@
 import os
 import json
 import warnings
+import re
+import sys
+import asyncio
+import threading
+from pathlib import Path
+from typing import Optional, Tuple
 
 # 屏蔽烦人的警告
 warnings.filterwarnings("ignore")
@@ -46,6 +52,31 @@ SPARSE_VECTOR_NAME = "langchain-sparse"
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "")
+
+# ==============================================================================
+# 🔧 OneBot MCP (optional)
+# ==============================================================================
+
+ONEBOT_MCP_ENABLED = os.getenv("ONEBOT_MCP_ENABLED", "0") == "1"
+ONEBOT_DEFAULT_TARGET = os.getenv("ONEBOT_DEFAULT_TARGET", "").strip()
+ONEBOT_DEFAULT_TARGET_TYPE = os.getenv("ONEBOT_DEFAULT_TARGET_TYPE", "").strip().lower()
+ONEBOT_DEFAULT_TARGET_ID = os.getenv("ONEBOT_DEFAULT_TARGET_ID", "").strip()
+ONEBOT_MCP_SERVER_PATH = os.getenv("ONEBOT_MCP_SERVER_PATH", "").strip()
+ONEBOT_SEND_MODE = os.getenv("ONEBOT_SEND_MODE", "auto").strip().lower()
+ONEBOT_MULTI_SEND = os.getenv("ONEBOT_MULTI_SEND", "0") == "1"
+ONEBOT_SEND_INTERVAL_SECONDS = float(os.getenv("ONEBOT_SEND_INTERVAL_SECONDS", "1.0"))
+
+_ONEBOT_TRIGGER_RE = re.compile(r"(发送|播放|发到|发送到|发给|发送给)")
+_ONEBOT_FILE_MODE_RE = re.compile(r"(文件|file|上传)", re.IGNORECASE)
+_ONEBOT_VOICE_NAME_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(vo_adv_[A-Za-z0-9_@-]+(?:\.mp3)?)(?![A-Za-z0-9_])",
+    re.IGNORECASE
+)
+_ONEBOT_FILE_EXT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(vo_adv_[A-Za-z0-9_@-]+\.mp3)(?![A-Za-z0-9_])",
+    re.IGNORECASE
+)
+_ONEBOT_TARGET_RE = re.compile(r"(?:发到|发送到|发给|发送给)\s*(群|群聊|群里|私聊|私信|好友)?\s*([0-9]{5,})")
 
 # ==============================================================================
 # 📝 Prompt Templates (供 API 和交互模式共用)
@@ -153,6 +184,276 @@ ANSWER_TEMPLATE = """你是一个精通《莲之空女学院》剧情的专家�
 """
 
 # ==============================================================================
+
+def _get_mcp_server_path() -> Path:
+    if ONEBOT_MCP_SERVER_PATH:
+        return Path(ONEBOT_MCP_SERVER_PATH).expanduser().resolve()
+    return (Path(__file__).parent / "mcp_onebot_server.py").resolve()
+
+
+def _parse_target_spec(raw: str) -> Optional[Tuple[str, int]]:
+    raw = raw.strip()
+    if not raw:
+        return None
+    if ":" in raw:
+        prefix, id_str = raw.split(":", 1)
+        prefix = prefix.strip().lower()
+        id_str = id_str.strip()
+    else:
+        prefix = ""
+        id_str = raw
+
+    try:
+        target_id = int(id_str)
+    except ValueError:
+        return None
+
+    if prefix in ("group", "g", "grp"):
+        target_type = "group"
+    elif prefix in ("private", "p", "user", "u"):
+        target_type = "private"
+    elif prefix in ("onebot", "qq"):
+        target_type = "group"
+    elif prefix == "":
+        target_type = "group"
+    else:
+        return None
+
+    return target_type, target_id
+
+
+def _get_default_target() -> Optional[Tuple[str, int]]:
+    if ONEBOT_DEFAULT_TARGET:
+        return _parse_target_spec(ONEBOT_DEFAULT_TARGET)
+    if ONEBOT_DEFAULT_TARGET_TYPE and ONEBOT_DEFAULT_TARGET_ID:
+        try:
+            target_id = int(ONEBOT_DEFAULT_TARGET_ID)
+        except ValueError:
+            return None
+        if ONEBOT_DEFAULT_TARGET_TYPE in ("group", "private"):
+            return ONEBOT_DEFAULT_TARGET_TYPE, target_id
+    return None
+
+
+def _extract_target_from_query(query: str) -> Optional[Tuple[str, int]]:
+    match = _ONEBOT_TARGET_RE.search(query)
+    if not match:
+        return None
+    hint = (match.group(1) or "").strip()
+    target_id = int(match.group(2))
+    if hint in ("私聊", "私信", "好友"):
+        return "private", target_id
+    return "group", target_id
+
+
+def _should_trigger_onebot(query: str) -> bool:
+    return bool(_ONEBOT_TRIGGER_RE.search(query))
+
+
+def _select_send_mode(query: str) -> str:
+    if ONEBOT_SEND_MODE in ("voice", "file"):
+        return ONEBOT_SEND_MODE
+    return "file" if _ONEBOT_FILE_MODE_RE.search(query) else "voice"
+
+
+def _dedupe_preserve(items):
+    seen = set()
+    result = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _extract_all_voice_names_from_text(text: str) -> list[str]:
+    if not text:
+        return []
+    matches = [m.group(1) for m in _ONEBOT_VOICE_NAME_RE.finditer(text)]
+    if not matches:
+        matches = [m.group(1) for m in _ONEBOT_FILE_EXT_RE.finditer(text)]
+    return _dedupe_preserve(matches)
+
+
+def _extract_voice_name_from_text(text: str) -> Optional[str]:
+    names = _extract_all_voice_names_from_text(text)
+    return names[0] if names else None
+
+
+def _extract_voice_names_from_docs(docs) -> list[str]:
+    results = []
+    for doc in docs or []:
+        meta = getattr(doc, "metadata", {}) or {}
+        voices = meta.get("voices") or meta.get("voice")
+        ctx = meta.get("ctx")
+
+        if not voices and ctx:
+            if isinstance(ctx, str) and (ctx.startswith("{") or ctx.startswith("[")):
+                try:
+                    ctx = json.loads(ctx)
+                except Exception:
+                    ctx = None
+            if isinstance(ctx, dict):
+                voices = ctx.get("voices") or ctx.get("voice")
+
+        if isinstance(voices, str):
+            parsed = _extract_all_voice_names_from_text(voices)
+            if parsed:
+                results.extend(parsed)
+                continue
+            try:
+                voices = json.loads(voices)
+            except Exception:
+                voices = [voices]
+
+        if isinstance(voices, list):
+            for voice in voices:
+                if isinstance(voice, str):
+                    parsed = _extract_all_voice_names_from_text(voice)
+                    if parsed:
+                        results.extend(parsed)
+
+        content = getattr(doc, "page_content", "")
+        parsed = _extract_all_voice_names_from_text(content)
+        if parsed:
+            results.extend(parsed)
+
+    return _dedupe_preserve(results)
+
+
+def _onebot_log(message: str) -> None:
+    print(f"[OneBot] {message}")
+
+
+def _snippet(text: Optional[str], limit: int = 120) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(text.strip().split())
+    if len(cleaned) > limit:
+        return f"{cleaned[:limit - 3]}..."
+    return cleaned
+
+
+async def _call_onebot_mcp_tool(
+    file_names: list[str],
+    target_type: str,
+    target_id: int,
+    mode: str,
+    interval_seconds: float
+) -> None:
+    try:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+    except Exception:
+        try:
+            from mcp.client import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+        except Exception as exc:
+            _onebot_log(f"MCP client not available: {exc}")
+            return
+
+    server_path = _get_mcp_server_path()
+    if not server_path.exists():
+        _onebot_log(f"MCP server script not found: {server_path}")
+        return
+
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(server_path)],
+        env=os.environ.copy()
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tool_name = "send_file" if mode == "file" else "send_voice"
+            total = len(file_names)
+            for idx, file_name in enumerate(file_names, start=1):
+                payload = {
+                    "file_name": file_name,
+                    "target_type": target_type,
+                    "target_id": target_id
+                }
+                _onebot_log(
+                    f"calling MCP tool={tool_name} target={target_type}:{target_id} "
+                    f"file={file_name} ({idx}/{total})"
+                )
+                await session.call_tool(tool_name, payload)
+                if idx < total and interval_seconds > 0:
+                    await asyncio.sleep(interval_seconds)
+            _onebot_log("MCP tool call finished")
+
+
+def _call_onebot_mcp_tool_safe(
+    file_names: list[str],
+    target_type: str,
+    target_id: int,
+    mode: str,
+    interval_seconds: float
+) -> None:
+    try:
+        asyncio.run(_call_onebot_mcp_tool(file_names, target_type, target_id, mode, interval_seconds))
+    except Exception as exc:
+        _onebot_log(f"MCP call failed: {exc}")
+
+
+def _maybe_trigger_onebot_tool(user_query: str, answer_text: str, docs=None) -> None:
+    trigger_match = _ONEBOT_TRIGGER_RE.search(user_query)
+    if not trigger_match:
+        return
+
+    if not ONEBOT_MCP_ENABLED:
+        _onebot_log(f"trigger found '{trigger_match.group(0)}' but MCP disabled; skip")
+        return
+
+    _onebot_log(f"trigger matched: '{trigger_match.group(0)}'")
+
+    target_from_query = _extract_target_from_query(user_query)
+    target = target_from_query or _get_default_target()
+    if not target:
+        _onebot_log("no target configured; set ONEBOT_DEFAULT_TARGET or ONEBOT_DEFAULT_TARGET_TYPE/ID")
+        return
+
+    target_source = "query" if target_from_query else "default"
+    target_type, target_id = target
+    _onebot_log(f"target: {target_type}:{target_id} (source={target_source})")
+
+    file_names = _extract_all_voice_names_from_text(answer_text)
+    file_source = "answer"
+    if not file_names:
+        file_names = _extract_all_voice_names_from_text(user_query)
+        file_source = "query"
+    if not file_names:
+        file_names = _extract_voice_names_from_docs(docs)
+        file_source = "docs"
+    if not file_names:
+        _onebot_log(
+            "voice file name not found; "
+            f"answer_snippet='{_snippet(answer_text)}'; "
+            f"query_snippet='{_snippet(user_query)}'; "
+            f"docs={len(docs) if docs else 0}"
+        )
+        return
+
+    mode = _select_send_mode(user_query)
+    if ONEBOT_SEND_MODE in ("voice", "file"):
+        _onebot_log(f"send mode forced by env: {mode}")
+    if not ONEBOT_MULTI_SEND and len(file_names) > 1:
+        _onebot_log(f"multi send disabled; {len(file_names)} matches, using first only")
+        file_names = [file_names[0]]
+    else:
+        _onebot_log(f"multi send enabled; sending {len(file_names)} file(s)")
+    _onebot_log(f"voice file(s): {', '.join(file_names)} (source={file_source})")
+    _onebot_log(f"send mode: {mode}")
+    _onebot_log(f"dispatching MCP tool call (interval={ONEBOT_SEND_INTERVAL_SECONDS}s)")
+    thread = threading.Thread(
+        target=_call_onebot_mcp_tool_safe,
+        args=(file_names, target_type, target_id, mode, ONEBOT_SEND_INTERVAL_SECONDS),
+        daemon=True
+    )
+    thread.start()
+
 
 def format_docs(docs):
     """
@@ -421,8 +722,12 @@ def process_single_query(user_query: str):
         return
     
     context_str = format_docs(combined_docs)
+    answer_chunks = []
     for chunk in c['answer_chain'].stream({"context": context_str, "original_question": user_query}):
+        answer_chunks.append(chunk)
         yield chunk
+    full_answer = "".join(answer_chunks)
+    _maybe_trigger_onebot_tool(user_query, full_answer, combined_docs)
 
 
 def main():

@@ -45,6 +45,8 @@ plotly>=5.18.0
 # --- 基础工具与网络 (Utilities) ---
 # 用于自定义 HTTP Reranker
 requests>=2.31.0
+# MCP server utilities
+mcp>=0.3.0
 # 计算 Token 数量
 tiktoken>=0.7.0
 # 环境变量管理

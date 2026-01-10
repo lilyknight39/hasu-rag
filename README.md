@@ -104,3 +104,71 @@ docker run -d \
   -e XINFERENCE_SERVER_URL="http://ip:9997" \
   your-image-name
 ```
+
+---
+
+## OneBot MCP 语音发送（可选）
+用于在 **用户明确要求“发送/播放/发到/发给”** 时，通过 MCP 工具把语音发送到 OneBot v11。
+默认只匹配 `vo_adv_...`（可带 `.mp3`）的语音文件名。
+
+### 容器挂载示例
+```bash
+-v /Users/nickel/Developer/hasu-rag/voices:/data/voices:ro
+```
+
+### 环境变量示范（路径映射 + 仅 mp3 + 自动发送）
+```bash
+# MCP 开关
+export ONEBOT_MCP_ENABLED=1
+export ONEBOT_MCP_AUTOSTART=1
+
+# OneBot 连接
+export ONEBOT_BASE_URL="http://127.0.0.1:5700"
+export ONEBOT_ACCESS_TOKEN=""
+
+# 语音目录（RAG 侧）
+export ONEBOT_VOICE_DIR="/Users/nickel/Developer/hasu-rag/voices"
+export ONEBOT_VOICE_EXTS=".mp3"
+
+# 路径映射：RAG 路径 -> OneBot 容器路径
+export ONEBOT_PATH_MAP_FROM="/Users/nickel/Developer/hasu-rag/voices"
+export ONEBOT_PATH_MAP_TO="/data/voices"
+
+# 目标默认值（群）
+export ONEBOT_DEFAULT_TARGET=""
+
+# 发送模式（auto/voice/file）
+export ONEBOT_SEND_MODE="auto"
+
+# 多文件发送与间隔
+export ONEBOT_MULTI_SEND=1
+export ONEBOT_SEND_INTERVAL_SECONDS=1.5
+```
+
+### 行为说明
+- 仅当用户问题中出现“发送/播放/发到/发给”等词触发发送。
+- 语音文件名优先从 **回答** 中提取，其次是 **用户问题**，最后从 **检索文档 metadata** 中兜底。
+- 默认仅发送 **第一条** 语音；设置 `ONEBOT_MULTI_SEND=1` 则按出现顺序逐条发送，并按 `ONEBOT_SEND_INTERVAL_SECONDS` 间隔。
+
+### 进阶配置
+```bash
+# MCP 服务器路径（默认 app/mcp_onebot_server.py）
+export ONEBOT_MCP_SERVER_PATH="/Users/nickel/Developer/hasu-rag/app/mcp_onebot_server.py"
+
+# 语音查找策略
+export ONEBOT_ALLOW_SUBDIRS=0
+export ONEBOT_VOICE_RECURSIVE=0
+
+# 发送 record 的方式：path 或 base64
+export ONEBOT_RECORD_MODE="path"
+export ONEBOT_FILE_PREFIX="file://"
+export ONEBOT_BASE64_PREFIX="base64://"
+
+# OneBot 超时（秒）
+export ONEBOT_TIMEOUT="10"
+
+# 默认目标的另一种写法
+export ONEBOT_DEFAULT_TARGET_TYPE=""
+export ONEBOT_DEFAULT_TARGET_ID=""
+```
+备注：`ONEBOT_RECORD_MODE=base64` 仅影响语音消息段；`upload_*_file` 仍要求 OneBot 能访问文件路径。

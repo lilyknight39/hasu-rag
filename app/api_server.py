@@ -13,6 +13,9 @@ from typing import List, Optional, Literal, Union
 import time
 import uuid
 import logging
+import subprocess
+import sys
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from auth import AuthManager
@@ -85,8 +88,30 @@ async def lifespan(app: FastAPI):
         logger.info("✅ RAG 系统加载成功")
     except Exception as e:
         logger.error(f"❌ RAG 系统加载失败: {e}")
+
+    mcp_process = None
+    if os.getenv("ONEBOT_MCP_AUTOSTART", "0") == "1":
+        script_path = (Path(__file__).parent / "mcp_onebot_server.py").resolve()
+        if script_path.exists():
+            try:
+                mcp_process = subprocess.Popen(
+                    [sys.executable, str(script_path)],
+                    env=os.environ.copy()
+                )
+                logger.info(f"✅ MCP OneBot server started (pid={mcp_process.pid})")
+            except Exception as e:
+                logger.warning(f"⚠️ MCP OneBot server failed to start: {e}")
+        else:
+            logger.warning(f"⚠️ MCP OneBot server script not found: {script_path}")
     
     yield
+
+    if mcp_process:
+        mcp_process.terminate()
+        try:
+            mcp_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            mcp_process.kill()
     
     logger.info("🛑 关闭 API 服务器...")
 
