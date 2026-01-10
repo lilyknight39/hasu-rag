@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import warnings
 
 # 屏蔽烦人的警告
@@ -10,7 +9,6 @@ warnings.filterwarnings("ignore")
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 # --- 检索组件 ---
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
@@ -45,9 +43,9 @@ SUMMARY_COLLECTION_NAME = "story_summary_store" # 宏观摘要
 SPARSE_VECTOR_NAME = "langchain-sparse"
 
 # 3. 生成后端 (LLM)
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.example.com/v1")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "your-")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "")
 
 # ==============================================================================
 # 📝 Prompt Templates (供 API 和交互模式共用)
@@ -75,50 +73,45 @@ INTENT_TEMPLATE = """你是一个查询意图分析专家。请分析用户的�
 若用户在问题中明确指定 analysis、overview、fact，优先使用该标签。
 """
 
-REWRITE_TEMPLATE = """你是一个专为 **RAG 混合检索系统 (Hybrid Search)** 设计的查询优化专家。
-该系统的下游包含两个检索引擎，你需要构造一个能同时满足它们需求的日文查询语句：
-
-1. **语义检索引擎 (Dense Vector / BGE-M3)**: 
-   - 偏好：完整的自然语言句子，包含主语、谓语、宾语。
-   - 目标：理解"谁做了什么"、"某种氛围"等抽象语义。
-   - 要求：**不要**破坏句子的语法结构。
-
-2. **关键词检索引擎 (Sparse Vector / BM25)**:
-   - 偏好：精确的专有名词（人名、地名、曲名）和稀有词汇。
-   - 目标：通过字面匹配通过 IDF 机制过滤无关文档。
-   - 要求：必须包含准确的角色名（如"乙宗梢"而非"梢"）。
-
-3. **术语修正 (Term Correction)**: 用户可能会使用错误的汉字或不准确的称呼。请利用你的知识库进行修正。
-    - 示例: "三剑士" -> 应该修正为 "三銃士" (因为莲之空剧情中常用的是"お気楽三銃士")
-    【角色名映射表 (必须严格遵守)】：
-    - 梢 / 梢前辈 -> 乙宗梢
-    - 花帆 / 花帆桑 -> 日野下花帆
-    - 慈 / 慈前辈 -> 藤島慈
-    - 瑠璃乃 -> 大沢瑠璃乃
-    - 吟子 / 百生 / 小吟子 -> 百生吟子
-    - 小铃 / 徒町 -> 徒町小鈴
-    - 姬芽 / 安養寺 -> 安養寺姫芽
-    - 塞拉斯 -> セラス (或昵称 セっちゃん)
-
-【处理建议】：
-- 扩展日文同义词（如："哭" -> `泣く 涙 号泣`）以匹配 BM25。
-- 确保角色名准确（使用映射表中的完整日文名）。
-
-【输出格式要求（极致严谨）】：
-1. **仅**输出一行结果，格式为：[修正后的自然日文问句] [同义词扩展] [类型关键词] [核心话题词]
-2. **严禁**输出任何解释、分析、执行步骤、前言或后记。
-3. **只**输出日文处理结果，不要输出中文。
-
-【示例】：
-用户: 梢哭了几次？
-输出: 乙宗梢は何回泣きましたか？ 泣く 涙 号泣 涙声 泣き顔 シーン
-
-用户: 谁在练习室生气了？
-输出: 練習室で誰が怒りましたか？ 怒る 激怒 不機嫌 喧嘩 場所
+DENSE_REWRITE_TEMPLATE = """你是为 **BGE-M3 语义检索** 服务的查询优化器。
+将用户问题改写为一条自然、完整的日文问句，保持主谓宾和语境，不要拆成关键词。
+纠正常见角色名，使用下方映射表的全名；如用户已有正确日文名，保持不变。
+若用户只给出短语/关键词，请补全成通顺的问句，但不要添加无关信息。
+【角色名映射表】梢/梢前辈->乙宗梢；花帆/花帆桑->日野下花帆；慈/慈前辈->藤島慈；瑠璃乃->大沢瑠璃乃；吟子/百生/小吟子->百生吟子；小铃/徒町->徒町小鈴；姬芽/安養寺->安養寺姫芽；塞拉斯->セラス。
+【输出示例】输入: 梢哭了几次？ 输出: 乙宗梢は何回泣きましたか？
+只输出改写后的日文问句，不要解释，不要追加其他字段。
 
 用户问题: {question}
+"""
 
-重要：严格遵守输出格式，禁止任何前言或后记，只输出一行优化后的结果。
+SPARSE_KEYWORD_TEMPLATE = """你是为 **BM25 关键词检索** 生成查询的专家。
+输出一串日文/假名关键词，偏重人名、地名、道具名、曲名、稀有词，使用空格分隔。
+原则：
+- 角色名用全名；目标名词用具体表记（含重要词形变体，如 动词/表情/别称）。
+- 计数类词最多保留 1 个（如「何回」或「回数」），不要堆叠。
+- 避免泛泛的「シーン/登場/場面」等低 IDF 词，除非用户要求。
+- 若用户明确禁止某词表记，遵从用户指示。
+要求：
+- 纠正常见角色名，使用下方映射表的全名。
+- 可以加入同义词/形态变化，但保持关键词形式，避免完整句子。
+- 若用户问题包含中文或编号，请保留。
+【角色名映射表】梢/梢前辈->乙宗梢；花帆/花帆桑->日野下花帆；慈/慈前辈->藤島慈；瑠璃乃->大沢瑠璃乃；吟子/百生/小吟子->百生吟子；小铃/徒町->徒町小鈴；姬芽/安養寺->安養寺姫芽；塞拉斯->セラス。
+【输出示例】输入: 梢哭了几次？ 输出: 乙宗梢 泣く 涙 回数
+格式：仅输出关键词串，使用空格分隔，不要添加解释或其他内容。
+
+用户问题: {question}
+"""
+
+ALPHA_TEMPLATE = """你是混合检索参数顾问，需要为 Dense+BM25 混合检索输出一个 alpha 值 (0.15~0.65)：
+- alpha 小 -> 更依赖 BM25；alpha 大 -> 更依赖语义。
+- 若问题含明确编号/ID/数字或短关键词，偏 BM25 (0.2~0.35)；
+- 若问题是长句、关系/因果分析，偏语义 (0.4~0.55)。
+【输出示例】示例1: 0.3  示例2: 0.45
+请结合原始中文和两种重写，输出一个数字（例如 0.3 或 0.45），禁止输出其他字符。
+
+【原始问题】：{original}
+【语义重写】：{dense}
+【关键词重写】：{sparse}
 """
 
 ANSWER_TEMPLATE = """你是一个精通《莲之空女学院》剧情的专家级 AI 剧情分析师。
@@ -214,6 +207,85 @@ def format_docs(docs):
         
     return "\n\n".join(formatted)
 
+
+def _dedupe_documents(docs):
+    """
+    通过文档顺序/point id 去重，避免多路检索后重复的上下文干扰 rerank。
+    """
+    seen = set()
+    unique = []
+    for doc in docs:
+        meta = doc.metadata or {}
+        key = None
+        if meta.get("order") is not None:
+            key = f"order:{meta.get('order')}"
+        elif meta.get("id"):
+            key = f"id:{meta.get('id')}"
+        elif meta.get("scene"):
+            key = f"scene:{meta.get('scene')}"
+        else:
+            key = doc.page_content[:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(doc)
+    return unique
+
+
+def _rerank_with_fallback(docs, query, reranker, limit):
+    if not docs:
+        return []
+    try:
+        reranked = reranker.compress_documents(docs, query=query)
+        if reranked:
+            return reranked[:limit]
+    except Exception:
+        pass
+    return docs[:limit]
+
+
+def _retrieve_detail_docs(raw_store, reranker, dense_query, sparse_query, raw_query, k_dense=180, k_sparse=120, limit=20, alpha=0.35):
+    """
+    双通道细节检索：
+    - dense_query: 适配语义通道的日文完整问句。
+    - sparse_query: 关键词串，偏向 BM25。
+    - raw_query: 用户原文，保留编号/未修正的关键词兜底。
+    """
+    doc_pool = []
+    dense_k = max(20, int(k_dense * (0.6 + alpha)))   # alpha 越大，dense 越多
+    sparse_k = max(20, int(k_sparse * (1.4 - alpha))) # alpha 越小，sparse 越多
+    print(f"🔧 [Internal] 检索参数: dense_k={dense_k}, sparse_k={sparse_k}, alpha={alpha}")
+
+    def _run(retriever, query):
+        if hasattr(retriever, "get_relevant_documents"):
+            return retriever.get_relevant_documents(query)
+        if hasattr(retriever, "invoke"):
+            return retriever.invoke(query)
+        return []
+
+    # 语义优先的主检索
+    semantic_retriever = raw_store.as_retriever(search_kwargs={"k": dense_k})
+    doc_pool.extend(_run(semantic_retriever, dense_query))
+
+    # 保留关键词的回落检索
+    lexical_retriever = raw_store.as_retriever(search_kwargs={"k": sparse_k})
+    doc_pool.extend(_run(lexical_retriever, sparse_query or raw_query))
+
+    # 用户原文再兜底一次，兼顾原始语言/编号
+    if raw_query and raw_query != sparse_query:
+        doc_pool.extend(_run(lexical_retriever, raw_query))
+
+    doc_pool = _dedupe_documents(doc_pool)
+    return _rerank_with_fallback(doc_pool, dense_query or sparse_query or raw_query, reranker, limit)
+
+
+def _parse_alpha(alpha_str: str, default: float = 0.35) -> float:
+    try:
+        val = float(alpha_str.strip())
+        return max(0.15, min(0.65, val))
+    except Exception:
+        return default
+
 # ==============================================================================
 # 🌐 API 接口 (供 api_server.py 调用)
 # ==============================================================================
@@ -246,21 +318,34 @@ def get_rag_components():
         )
     
     llm = ChatOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, model=LLM_MODEL_NAME,
-                     temperature=0.7, streaming=True, max_tokens=10240)
+                     temperature=0.7, streaming=False, max_tokens=20480)
     rewrite_llm = ChatOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, model=LLM_MODEL_NAME,
                              temperature=0.0, streaming=False)
     
     reranker = XinferenceRerank(url=f"{XINFERENCE_URL.rstrip('/')}/v1/rerank",
-                                model_uid=RERANK_MODEL, top_n=25, request_timeout=240)
+                                model_uid=RERANK_MODEL, top_n=20, request_timeout=240)
     compression_retriever = ContextualCompressionRetriever(
         base_compressor=reranker, base_retriever=raw_store.as_retriever(search_kwargs={"k": 150})
     )
+
+    intent_chain = ChatPromptTemplate.from_template(INTENT_TEMPLATE) | rewrite_llm | StrOutputParser()
+    dense_rewrite_chain = ChatPromptTemplate.from_template(DENSE_REWRITE_TEMPLATE) | rewrite_llm | StrOutputParser()
+    sparse_rewrite_chain = ChatPromptTemplate.from_template(SPARSE_KEYWORD_TEMPLATE) | rewrite_llm | StrOutputParser()
+    alpha_chain = ChatPromptTemplate.from_template(ALPHA_TEMPLATE) | rewrite_llm | StrOutputParser()
+    answer_chain = ChatPromptTemplate.from_template(ANSWER_TEMPLATE) | llm | StrOutputParser()
     
     _rag_components = {
         'summary_store': summary_store,
         'compression_retriever': compression_retriever,
+        'raw_store': raw_store,
+        'reranker': reranker,
         'rewrite_llm': rewrite_llm,
-        'llm': llm
+        'llm': llm,
+        'intent_chain': intent_chain,
+        'dense_rewrite_chain': dense_rewrite_chain,
+        'sparse_rewrite_chain': sparse_rewrite_chain,
+        'alpha_chain': alpha_chain,
+        'answer_chain': answer_chain
     }
     print("✅ RAG 组件初始化完成")
     return _rag_components
@@ -270,41 +355,64 @@ def process_single_query(user_query: str):
     """
     处理单个查询（供 API 调用，流式返回）
     
-    使用模块级常量 INTENT_TEMPLATE, REWRITE_TEMPLATE, ANSWER_TEMPLATE
+    使用模块级常量 INTENT_TEMPLATE, DENSE_REWRITE_TEMPLATE, SPARSE_KEYWORD_TEMPLATE, ANSWER_TEMPLATE
     """
     c = get_rag_components()
     
-    # 使用模块级常量构建 chains
-    intent_chain = ChatPromptTemplate.from_template(INTENT_TEMPLATE) | c['rewrite_llm'] | StrOutputParser()
-    rewrite_chain = ChatPromptTemplate.from_template(REWRITE_TEMPLATE) | c['rewrite_llm'] | StrOutputParser()
-    answer_chain = ChatPromptTemplate.from_template(ANSWER_TEMPLATE) | c['llm'] | StrOutputParser()
-    
     # 执行查询流程
     print(f"\n🔍 [Internal] 开始处理查询: {user_query}")
-    intent = intent_chain.invoke({"query": user_query}).strip().lower()
+    intent = c['intent_chain'].invoke({"query": user_query}).strip().lower()
     print(f"💡 [Internal] 识别意图: {intent}")
     
     combined_docs = []
+    dense_query = c['dense_rewrite_chain'].invoke({"question": user_query}).strip()
+    sparse_query = c['sparse_rewrite_chain'].invoke({"question": user_query}).strip()
+    alpha_raw = c['alpha_chain'].invoke({
+        "original": user_query,
+        "dense": dense_query,
+        "sparse": sparse_query
+    }).strip()
+    alpha = _parse_alpha(alpha_raw, default=0.35)
+    print(f"🔄 [Internal] 语义重写 (JP): {dense_query}")
+    print(f"🧩 [Internal] 关键词重写 (BM25): {sparse_query}")
+    print(f"⚖️ [Internal] Alpha 建议: {alpha_raw} -> 采用 {alpha}")
     
     if 'analysis' in intent:
         if c['summary_store']:
             print("📅 [Internal] 正在检索宏观背景 (Summary)...")
             combined_docs.extend(c['summary_store'].similarity_search(user_query, k=5))
         
-        jp_query = rewrite_chain.invoke({"question": user_query})
-        print(f"🔄 [Internal] 查询重写 (JP): {jp_query}")
-        print("🧪 [Internal] 正在检索细节证据 (Details)...")
-        combined_docs.extend(c['compression_retriever'].invoke(jp_query)[:15])
+        print("🧪 [Internal] 双通道检索细节 (JP rewrite + 原文关键词)...")
+        detail_docs = _retrieve_detail_docs(
+            raw_store=c['raw_store'],
+            reranker=c['reranker'],
+            dense_query=dense_query,
+            sparse_query=sparse_query,
+            raw_query=user_query,
+            k_dense=200,
+            k_sparse=140,
+            limit=18,
+            alpha=alpha
+        )
+        combined_docs.extend(detail_docs)
         
     elif 'overview' in intent and c['summary_store']:
         print("📖 [Internal] 正在检索宏观摘要...")
         combined_docs = c['summary_store'].similarity_search(user_query, k=10)
         
     else:
-        jp_query = rewrite_chain.invoke({"question": user_query})
-        print(f"🔄 [Internal] 查询重写 (JP): {jp_query}")
-        print("🕵️ [Internal] 正在检索具体事实 (Fact/Details)...")
-        combined_docs = c['compression_retriever'].invoke(jp_query)
+        print("🕵️ [Internal] 双通道检索事实 (JP rewrite + 原文关键词)...")
+        combined_docs = _retrieve_detail_docs(
+            raw_store=c['raw_store'],
+            reranker=c['reranker'],
+            dense_query=dense_query,
+            sparse_query=sparse_query,
+            raw_query=user_query,
+            k_dense=220,
+            k_sparse=160,
+            limit=20,
+            alpha=alpha
+        )
     
     print(f"📚 [Internal] 检索完成，共获取 {len(combined_docs)} 个上下文片段")
     
@@ -313,86 +421,15 @@ def process_single_query(user_query: str):
         return
     
     context_str = format_docs(combined_docs)
-    for chunk in answer_chain.stream({"context": context_str, "original_question": user_query}):
+    for chunk in c['answer_chain'].stream({"context": context_str, "original_question": user_query}):
         yield chunk
 
 
 def main():
     print(f"\n启动分层智能问答系统 (Hierarchical RAG)...")
     
-    # 1. 初始化连接
-    client = QdrantClient(url=QDRANT_URL)
-    dense_emb = XinferenceEmbeddings(server_url=XINFERENCE_URL, model_uid=EMBED_MODEL)
-    sparse_emb = FastEmbedSparse(model_name="Qdrant/bm25")
-    
-    # --- 初始化两个 Vector Store ---
-    raw_store = QdrantVectorStore(
-        client=client,
-        collection_name=RAW_COLLECTION_NAME,
-        embedding=dense_emb,
-        sparse_embedding=sparse_emb,
-        sparse_vector_name=SPARSE_VECTOR_NAME,
-        retrieval_mode=RetrievalMode.HYBRID # 细节：Hybrid Search
-    )
-    
-    # 检查摘要集合是否存在
-    if not client.collection_exists(SUMMARY_COLLECTION_NAME):
-        print(f"⚠️ 注意：宏观摘要集合 '{SUMMARY_COLLECTION_NAME}' 不存在！")
-        print("    请先运行 'build_hierarchy.py' 来生成摘要索引。")
-        summary_store = None
-    else:
-        summary_store = QdrantVectorStore(
-            client=client,
-            collection_name=SUMMARY_COLLECTION_NAME,
-            embedding=dense_emb,
-            retrieval_mode=RetrievalMode.DENSE # 摘要：Dense Search 即可
-        )
-
-
-    # 2. 初始化 LLM
-    llm = ChatOpenAI(
-        base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY,
-        model=LLM_MODEL_NAME,
-        temperature=0.7, # 用于生成回答
-        streaming=True,
-        max_tokens=10240
-    )
-
-    rewrite_llm = ChatOpenAI(
-        base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY,
-        model=LLM_MODEL_NAME,
-        temperature=0.0, # 用于翻译和分类，保证稳定性
-        streaming=False
-    )
-    
-
-    intent_prompt = ChatPromptTemplate.from_template(INTENT_TEMPLATE)
-    intent_chain = intent_prompt | rewrite_llm | StrOutputParser()
-
-    # 2. 细节检索路径 (Specific Path)
-    # 查询重写 Prompt
-    rewrite_prompt = ChatPromptTemplate.from_template(REWRITE_TEMPLATE)
-    rewrite_chain = rewrite_prompt | rewrite_llm | StrOutputParser()
-    
-    # Reranker 配置
-    reranker = XinferenceRerank(
-        url=f"{XINFERENCE_URL.rstrip('/')}/v1/rerank",
-        model_uid=RERANK_MODEL,
-        top_n=25,
-        request_timeout=240
-    )
-    
-    # 细节检索器
-    compression_retriever = ContextualCompressionRetriever(
-        base_compressor=reranker,
-        base_retriever=raw_store.as_retriever(search_kwargs={"k": 150})
-    )
-
-    # 细节生成 Prompt
-    # 统一的回答生成 Prompt (融合了 specific 和 fusion 的优点)
-    fusion_answer_prompt = ChatPromptTemplate.from_template(ANSWER_TEMPLATE)
+    # 触发组件初始化，复用 API 同款管线
+    get_rag_components()
 
     # --- 交互循环 ---
     while True:
@@ -401,69 +438,9 @@ def main():
         if user_query.lower() in ['q', 'exit']: break
         
         try:
-            # 1. 意图分类
-            print(f"🤖 正在分析意图...", end="", flush=True)
-            intent = intent_chain.invoke({"query": user_query}).strip().lower()
-            print(f"\r✅ 意图识别: 【{intent}】           ")
-            
-            combined_docs = []
-
-            # =================================================
-            # 🚀 策略 A: 深度分析 (Analysis) -> 双路检索融合
-            # =================================================
-            if 'analysis' in intent:
-                print("🔄 启动双路检索 (Dual-Path Retrieval)...")
-                
-                # Path 1: 查摘要 (获取背景)
-                if summary_store:
-                    print("   └── 正在提取宏观背景 (Summary)...")
-                    # 摘要不需要重写，直接用中文搜语义即可，取 Top 5
-                    summary_docs = summary_store.similarity_search(user_query, k=5)
-                    combined_docs.extend(summary_docs)
-                
-                # Path 2: 查细节 (获取证据)
-                print("   └── 正在挖掘细节证据 (Details)...")
-                jp_query = rewrite_chain.invoke({"question": user_query})
-                # 细节检索需要重写为日文
-                detail_docs = compression_retriever.invoke(jp_query)
-                # 我们取前 15 个细节，避免冲淡摘要的权重
-                combined_docs.extend(detail_docs[:15])
-
-            # =================================================
-            # 📖 策略 B: 宏观概括 (Overview) -> 只查摘要
-            # =================================================
-            elif 'overview' in intent and summary_store:
-                print("🔍 检索宏观摘要...")
-                combined_docs = summary_store.similarity_search(user_query, k=10)
-
-            # =================================================
-            # 🔍 策略 C: 事实追问 (Fact) -> 只查细节
-            # =================================================
-            else: # fact 或 fallback
-                print("🔍 检索具体细节...")
-                jp_query = rewrite_chain.invoke({"question": user_query})
-                combined_docs = compression_retriever.invoke(jp_query)
-
-            # --- 统一生成环节 ---
-            if not combined_docs:
-                print("⚠️ 未找到相关信息。")
-                continue
-
-            # 格式化所有文档（自动处理混合类型）
-            context_str = format_docs(combined_docs)
-            
-            print(f"🤖 正在生成深度回答 (Context Size: {len(combined_docs)} chunks)...")
-            print("-" * 30)
-            
-            # 使用融合 Prompt
-            final_chain = fusion_answer_prompt | llm | StrOutputParser()
-            
-            for chunk in final_chain.stream({
-                "context": context_str,
-                "original_question": user_query
-            }):
+            for chunk in process_single_query(user_query):
                 print(chunk, end="", flush=True)
-            print("\n")
+            print()
             
         except Exception as e:
             print(f"\n❌ 流程出错: {e}")

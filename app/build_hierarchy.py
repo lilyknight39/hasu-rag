@@ -122,9 +122,18 @@ def perform_clustering(points, n_clusters=None):
         
     return ordered_clusters
 
+def _strip_meta_suffix(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    marker = "\n\n[meta]"
+    if marker in text:
+        return text.split(marker, 1)[0]
+    return text
+
+
 def generate_summary(llm, cluster_points):
     """生成日文摘要"""
-    texts = [p.payload.get('page_content', '') for p in cluster_points]
+    texts = [_strip_meta_suffix(p.payload.get('page_content', '')) for p in cluster_points]
     combined_text = "\n---\n".join(texts)[:20000] # 略微增大 Context Limit
     
     template = """あなたは『蓮ノ空女学院スクールアイドルクラブ』のシナリオ編集の専門家です。

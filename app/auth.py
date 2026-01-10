@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 class APIKeyConfig:
     """API Key 配置"""
-    def __init__(self, key: str, name: str, rate_limit_minutes: int = 3):
+    def __init__(self, key: str, name: str, rate_limit_seconds: int = 30):
         self.key = key
         self.name = name
-        self.rate_limit_minutes = rate_limit_minutes
-        self.rate_limit_seconds = rate_limit_minutes * 60
+        self.rate_limit_minutes = rate_limit_seconds / 60
+        self.rate_limit_seconds = rate_limit_seconds
 
 
 import threading

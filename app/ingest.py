@@ -39,30 +39,73 @@ def resolve_data_file() -> str:
             return path
     raise FileNotFoundError(f"未找到可用的数据文件，请检查是否存在: {', '.join(candidates)}")
 
+def _normalize_text(item: dict) -> str:
+    """仅支持 timeline_flow_optimized.json 的 text/script。"""
+    text = item.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    script = item.get("script", [])
+    if isinstance(script, list) and script:
+        lines = []
+        for turn in script:
+            speaker = turn.get("c")
+            text = turn.get("t", "")
+            prefix = f"{speaker}: " if speaker else ""
+            lines.append(f"{prefix}{text}")
+        return "\n".join(lines)
+    raise ValueError("新格式数据缺少 text 或 script")
+
+
+def _collect_strings(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_collect_strings(item))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            out.extend(_collect_strings(item))
+        return out
+    return []
+
+
+def _extract_meta_tokens(item: dict) -> List[str]:
+    ctx = item.get("ctx") or {}
+    tokens = []
+    tokens.extend(_collect_strings(ctx.get("chars")))
+    tokens.extend(_collect_strings(ctx.get("loc")))
+    tokens.extend(_collect_strings(ctx.get("time")))
+    tokens.extend(_collect_strings(ctx.get("emo")))
+    tokens.extend(_collect_strings(ctx.get("state_emo")))
+    # 去重并裁剪，避免元信息过长污染正文
+    seen = set()
+    deduped = []
+    for tok in tokens:
+        tok = tok.strip()
+        if not tok or tok in seen:
+            continue
+        seen.add(tok)
+        deduped.append(tok)
+    return deduped[:120]
+
+
 def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    if isinstance(data, dict): data = [data]
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise ValueError("数据文件格式错误，需为列表或单条对象。")
     
     docs = []
     ids = []
     
     print(f"📊 正在解析 {len(data)} 条数据...")
-
-    def _normalize_text(item: dict) -> str:
-        """优先使用新格式里的 text 字段，不存在时回退到 script 列表。"""
-        if item.get("text"):
-            return item["text"]
-        script = item.get("script", [])
-        if isinstance(script, list) and script:
-            lines = []
-            for turn in script:
-                speaker = turn.get("c")
-                text = turn.get("t", "")
-                prefix = f"{speaker}: " if speaker else ""
-                lines.append(f"{prefix}{text}")
-            return "\n".join(lines)
-        return item.get("content", "")
 
     for order_idx, item in enumerate(data):
         ctx = item.get("ctx") or {}
@@ -101,6 +144,9 @@ def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
         }
 
         content = _normalize_text(item)
+        meta_tokens = _extract_meta_tokens(item)
+        if meta_tokens:
+            content = f"{content}\n\n[meta] " + " ".join(meta_tokens)
         ids.append(point_id)
         docs.append(Document(page_content=content, metadata=processed_meta))
         

@@ -8,6 +8,7 @@
 - 仅支持 **`data/timeline_flow_optimized.json`** 新格式；旧版 stories/optimized_final/new_stories 路径已废弃。
 - 入库生成 ID：`scene/id` -> UUID5（稳定可覆盖），按文件顺序写入 `metadata.order` 保障时间线。
 - Metadata 完整保留 `ctx/stats/timeline/act/emo/state_*`、台词 `dialogues` 与来源 `src`，所有聚类与可视化均按 `metadata.order` 排序。
+- 入库时会将 `ctx` 中的角色/表情等关键词追加到正文末尾 `[meta]`，用于 BM25 稀疏检索；摘要生成会自动剥离该段。
 
 ---
 
@@ -17,6 +18,7 @@
 - **stats**：`tok`（token 数）、`dlg`（对话轮次）。
 - **timeline**：按角色记录动作/情感演变。
 - 入库内容来源：优先 `text`，缺失则拼接 `script` 的 `c/t` 字段。
+- `ctx.chars/loc/time/emo/state_emo` 会被提炼为关键词，追加到正文尾部 `[meta]` 用于 BM25。
 
 ---
 
@@ -27,6 +29,8 @@
 - **查询路由**
   - 意图分类：`fact` / `overview` / `analysis`。
   - `fact` → 细节库；`overview` → 摘要库；`analysis` → 摘要 + 细节双路融合。
+- **检索细节**
+  - 语义通道与关键词通道分别重写，LLM 提供动态 alpha 以调节两路候选规模。
 - **时间序聚类**：Agglomerative + 邻接约束，仅合并相邻片段；LLM 生成摘要并按指纹增量更新。
 
 ---
@@ -45,7 +49,7 @@
    export LLM_MODEL_NAME=""
    # 可选：自定义数据路径
    export DATA_FILE="/path/to/timeline_flow_optimized.json"
-   export APPEND_DATA_FILE="/path/to/new_timeline_data.json"
+   export APPEND_DATA_FILE="/path/to/timeline_flow_optimized.json"
    ```
 3) **全量入库（会重建集合）**  
    ```bash
@@ -55,6 +59,7 @@
    ```bash
    python app/ingest_append.py
    ```
+   - 仅支持新格式，需设置 `APPEND_DATA_FILE` 指向可用文件。
 5) **构建/刷新摘要索引**  
    ```bash
    python app/build_hierarchy.py

@@ -23,7 +23,7 @@ SPARSE_VECTOR_NAME = "langchain-sparse" # 必须与建表时一致
 def resolve_default_append_path() -> str:
     """
     选择一个实际存在的默认数据路径，避免用户直接回车后指向不存在的文件。
-    优先使用环境变量，其次尝试增量示例文件，再回退到当前可用的全量文件。
+    仅支持 timeline_flow_optimized.json 新格式。
     """
     candidates = [
         os.getenv("APPEND_DATA_FILE", "").strip(),
@@ -33,40 +33,80 @@ def resolve_default_append_path() -> str:
     for path in candidates:
         if path and os.path.exists(path):
             return path
-    # 如果都不存在，保留旧默认值，后续会有明确报错
-    return "/data/new_stories.json"
+    raise FileNotFoundError("未找到可用的增量数据文件，请设置 APPEND_DATA_FILE。")
 
-def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
+def _normalize_text(item: dict) -> str:
+    """仅支持 timeline_flow_optimized.json 的 text/script。"""
+    text = item.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    script = item.get("script", [])
+    if isinstance(script, list) and script:
+        lines = []
+        for turn in script:
+            speaker = turn.get("c")
+            text = turn.get("t", "")
+            prefix = f"{speaker}: " if speaker else ""
+            lines.append(f"{prefix}{text}")
+        return "\n".join(lines)
+    raise ValueError("新格式数据缺少 text 或 script")
+
+
+def _collect_strings(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_collect_strings(item))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            out.extend(_collect_strings(item))
+        return out
+    return []
+
+
+def _extract_meta_tokens(item: dict) -> List[str]:
+    ctx = item.get("ctx") or {}
+    tokens = []
+    tokens.extend(_collect_strings(ctx.get("chars")))
+    tokens.extend(_collect_strings(ctx.get("loc")))
+    tokens.extend(_collect_strings(ctx.get("time")))
+    tokens.extend(_collect_strings(ctx.get("emo")))
+    tokens.extend(_collect_strings(ctx.get("state_emo")))
+    seen = set()
+    deduped = []
+    for tok in tokens:
+        tok = tok.strip()
+        if not tok or tok in seen:
+            continue
+        seen.add(tok)
+        deduped.append(tok)
+    return deduped[:120]
+
+
+def load_data_with_ids(file_path: str, order_offset: int = 0) -> Tuple[List[Document], List[str]]:
     """
-    加载数据逻辑保持不变，确保 ID 生成算法一致 (UUID5)，
-    这样如果数据重复，Qdrant 会执行更新而不是插入重复项。
+    仅支持 timeline_flow_optimized.json，新格式缺失关键字段将直接报错。
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"找不到文件: {file_path}")
 
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    if isinstance(data, dict): data = [data]
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise ValueError("数据文件格式错误，需为列表或单条对象。")
     
     docs = []
     ids = []
     
     print(f"📊 正在解析 {len(data)} 条新数据...")
-
-    def _normalize_text(item: dict) -> str:
-        """优先使用新格式里的 text 字段，不存在时回退到 script 列表。"""
-        if item.get("text"):
-            return item["text"]
-        script = item.get("script", [])
-        if isinstance(script, list) and script:
-            lines = []
-            for turn in script:
-                speaker = turn.get("c")
-                text = turn.get("t", "")
-                prefix = f"{speaker}: " if speaker else ""
-                lines.append(f"{prefix}{text}")
-            return "\n".join(lines)
-        return item.get("content", "")
 
     for order_idx, item in enumerate(data):
         ctx = item.get("ctx") or {}
@@ -85,7 +125,7 @@ def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
             "scene": item.get("scene") or raw_id or "unknown",
             "id": raw_id,
             "source": item.get("src", ""),
-            "order": order_idx,
+            "order": order_offset + order_idx,
             "chars": ctx.get("chars") or [],
             "voices": ctx.get("voices") or [],
             "loc": ctx.get("loc"),
@@ -105,6 +145,9 @@ def load_data_with_ids(file_path: str) -> Tuple[List[Document], List[str]]:
         }
 
         content = _normalize_text(item)
+        meta_tokens = _extract_meta_tokens(item)
+        if meta_tokens:
+            content = f"{content}\n\n[meta] " + " ".join(meta_tokens)
         ids.append(point_id)
         docs.append(Document(page_content=content, metadata=processed_meta))
         
@@ -123,7 +166,11 @@ def main():
         return
 
     # 2. 输入新数据路径
-    default_path = resolve_default_append_path()
+    try:
+        default_path = resolve_default_append_path()
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return
     file_path = input(f"📂 请输入新数据文件路径 [默认: {default_path}]: ").strip()
     if not file_path:
         file_path = default_path
@@ -140,7 +187,8 @@ def main():
 
     # 4. 加载新数据
     try:
-        docs, ids = load_data_with_ids(file_path)
+        existing_count = client.count(collection_name=COLLECTION_NAME, exact=True).count
+        docs, ids = load_data_with_ids(file_path, order_offset=existing_count)
     except Exception as e:
         print(f"❌ 读取数据失败: {e}")
         return
