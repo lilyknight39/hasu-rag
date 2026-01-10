@@ -2,6 +2,8 @@ from qdrant_client import QdrantClient
 import os
 import json
 
+import env_loader  # load .env if present
+
 client = QdrantClient(url=os.getenv("QDRANT_URL", "http://qdrant:6333"))
 COLLECTION_NAME = "story_knowledge_base"
 

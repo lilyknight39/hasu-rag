@@ -3,6 +3,8 @@ import json
 import time
 import numpy as np
 import warnings
+
+import env_loader  # load .env if present
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.neighbors import kneighbors_graph
 from qdrant_client import QdrantClient

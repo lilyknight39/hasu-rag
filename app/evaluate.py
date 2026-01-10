@@ -2,6 +2,8 @@ import os
 import time
 import re
 
+import env_loader  # load .env if present
+
 # [New] 引入混合检索组件
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from langchain_community.embeddings import XinferenceEmbeddings

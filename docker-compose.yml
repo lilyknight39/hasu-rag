@@ -17,10 +17,13 @@ services:
     working_dir: /app
     ports:
       - "8217:8217"
+    env_file:
+      - ./.env
     volumes:
       - ./app:/app
       - ./data:/data
       - ./requirements.txt:/app/requirements.txt:ro
+      - ./.env:/app/.env:ro
     # 保持容器运行，以便我们可以进入容器执行命令
     command: sh -c "pip install --no-cache-dir -r /app/requirements.txt && tail -f /dev/null"
     depends_on:

@@ -8,6 +8,8 @@ import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
+import env_loader  # load .env if present
+
 # 屏蔽烦人的警告
 warnings.filterwarnings("ignore")
 

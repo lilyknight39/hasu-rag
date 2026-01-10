@@ -9,6 +9,8 @@ import base64
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
+import env_loader  # load .env if present
+
 import requests
 from mcp.server.fastmcp import FastMCP
 

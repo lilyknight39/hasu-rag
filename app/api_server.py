@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import env_loader  # load .env if present
+
 from auth import AuthManager
 from rag_wrapper import get_rag_system
 

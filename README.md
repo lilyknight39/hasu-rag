@@ -41,6 +41,7 @@
    pip install -r requirements.txt  # Python 3.11
    ```
 2) **配置环境变量（示例）**
+   - 推荐：复制 `.env.example` 为 `.env`，脚本会自动加载该文件；`docker-compose.yml` 也会挂载并注入环境变量。
    ```bash
    export QDRANT_URL="http://localhost:6333"
    export XINFERENCE_SERVER_URL="http://your-server:9997"

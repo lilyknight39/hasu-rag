@@ -4,6 +4,8 @@ import uuid
 import warnings
 from typing import List, Tuple
 
+import env_loader  # load .env if present
+
 # 屏蔽警告
 warnings.filterwarnings("ignore")
 

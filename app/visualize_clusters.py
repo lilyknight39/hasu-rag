@@ -6,6 +6,8 @@ from sklearn.neighbors import kneighbors_graph
 from sklearn.manifold import TSNE
 from qdrant_client import QdrantClient
 
+import env_loader  # load .env if present
+
 # --- 配置 ---
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 COLLECTION_NAME = "story_knowledge_base"

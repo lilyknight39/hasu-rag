@@ -3,6 +3,8 @@ import json
 import requests
 from qdrant_client import QdrantClient
 
+import env_loader  # load .env if present
+
 # 配置
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 XINFERENCE_URL = os.getenv("XINFERENCE_SERVER_URL", "http://192.168.123.113:9997")
