@@ -45,7 +45,7 @@
    ```bash
    export QDRANT_URL="http://localhost:6333"
    export XINFERENCE_SERVER_URL="http://your-server:9997"
-   export LLM_BASE_URL="http://your-server:9001/v1"
+   export LLM_BASE_URL=""
    export LLM_API_KEY=""
    export LLM_MODEL_NAME=""
    # 可选：自定义数据路径
