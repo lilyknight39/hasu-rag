@@ -54,6 +54,7 @@ SPARSE_VECTOR_NAME = "langchain-sparse"
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "")
+LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
 
 # ==============================================================================
 # 🔧 OneBot MCP (optional)
@@ -183,6 +184,12 @@ ANSWER_TEMPLATE = """你是一个精通《莲之空女学院》剧情的专家�
    - 如果检索到的信息中没有任何与问题相关的内容，请直接回答："在当前检索到的剧情中未找到相关信息。"，不要编造。
 
 5. **语言要求**：必须用**中文**回答。
+
+6. **语音清单输出 (仅在用户要求播放/发送语音时)**：
+   - 若用户请求播放/发送语音，请在回答末尾单独输出一行：
+     VOICE_LIST: 以逗号分隔的语音文件名列表
+   - 若只需播放一句特定语音，请只输出一个文件名。
+   - 若无法确定具体语音文件名，请不要输出 VOICE_LIST。
 """
 
 # ==============================================================================
@@ -328,6 +335,10 @@ def _onebot_log(message: str) -> None:
     print(f"[OneBot] {message}")
 
 
+def _onebot_warn(message: str) -> None:
+    print(f"[OneBot][WARN] {message}")
+
+
 def _snippet(text: Optional[str], limit: int = 120) -> str:
     if not text:
         return ""
@@ -337,6 +348,24 @@ def _snippet(text: Optional[str], limit: int = 120) -> str:
     return cleaned
 
 
+def _extract_voice_list_from_answer(answer_text: str) -> list[str]:
+    if not answer_text:
+        return []
+    match = re.search(r"^VOICE_LIST:\s*(.+)$", answer_text, re.MULTILINE)
+    if not match:
+        return []
+    raw_list = match.group(1).strip()
+    if not raw_list:
+        return []
+    candidates = []
+    for item in raw_list.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        candidates.append(item)
+    return _dedupe_preserve(candidates)
+
+
 async def _call_onebot_mcp_tool(
     file_names: list[str],
     target_type: str,
@@ -344,6 +373,9 @@ async def _call_onebot_mcp_tool(
     mode: str,
     interval_seconds: float
 ) -> None:
+    _onebot_log(
+        f"prepare MCP client: target={target_type}:{target_id} mode={mode} files={len(file_names)}"
+    )
     try:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -352,14 +384,15 @@ async def _call_onebot_mcp_tool(
             from mcp.client import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
         except Exception as exc:
-            _onebot_log(f"MCP client not available: {exc}")
+            _onebot_warn(f"MCP client not available: {exc}")
             return
 
     server_path = _get_mcp_server_path()
     if not server_path.exists():
-        _onebot_log(f"MCP server script not found: {server_path}")
+        _onebot_warn(f"MCP server script not found: {server_path}")
         return
 
+    _onebot_log(f"launch MCP server: {server_path}")
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[str(server_path)],
@@ -368,7 +401,11 @@ async def _call_onebot_mcp_tool(
 
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
-            await session.initialize()
+            try:
+                await session.initialize()
+            except Exception as exc:
+                _onebot_warn(f"MCP initialize failed: {exc}")
+                raise
             tool_name = "send_file" if mode == "file" else "send_voice"
             total = len(file_names)
             for idx, file_name in enumerate(file_names, start=1):
@@ -381,7 +418,14 @@ async def _call_onebot_mcp_tool(
                     f"calling MCP tool={tool_name} target={target_type}:{target_id} "
                     f"file={file_name} ({idx}/{total})"
                 )
-                await session.call_tool(tool_name, payload)
+                try:
+                    await session.call_tool(tool_name, payload)
+                except Exception as exc:
+                    _onebot_warn(
+                        f"MCP tool call failed: tool={tool_name} target={target_type}:{target_id} "
+                        f"file={file_name} error={exc}"
+                    )
+                    raise
                 if idx < total and interval_seconds > 0:
                     await asyncio.sleep(interval_seconds)
             _onebot_log("MCP tool call finished")
@@ -397,7 +441,7 @@ def _call_onebot_mcp_tool_safe(
     try:
         asyncio.run(_call_onebot_mcp_tool(file_names, target_type, target_id, mode, interval_seconds))
     except Exception as exc:
-        _onebot_log(f"MCP call failed: {exc}")
+        _onebot_warn(f"MCP call failed: {exc}")
 
 
 def _maybe_trigger_onebot_tool(user_query: str, answer_text: str, docs=None) -> None:
@@ -421,14 +465,8 @@ def _maybe_trigger_onebot_tool(user_query: str, answer_text: str, docs=None) -> 
     target_type, target_id = target
     _onebot_log(f"target: {target_type}:{target_id} (source={target_source})")
 
-    file_names = _extract_all_voice_names_from_text(answer_text)
-    file_source = "answer"
-    if not file_names:
-        file_names = _extract_all_voice_names_from_text(user_query)
-        file_source = "query"
-    if not file_names:
-        file_names = _extract_voice_names_from_docs(docs)
-        file_source = "docs"
+    file_names = _extract_voice_list_from_answer(answer_text)
+    file_source = "answer_marker"
     if not file_names:
         _onebot_log(
             "voice file name not found; "
@@ -589,6 +627,29 @@ def _parse_alpha(alpha_str: str, default: float = 0.35) -> float:
     except Exception:
         return default
 
+
+def _is_timeout_exception(exc: Exception) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    text = str(exc).lower()
+    return "timeout" in text or "timed out" in text
+
+
+def _llm_timeout_warn(stage: str, user_query: str, exc: Exception) -> None:
+    print(
+        f"⚠️ [Warn] LLM 调用超时: stage={stage}; "
+        f"query_snippet='{_snippet(user_query)}'; error={exc}"
+    )
+
+
+def _invoke_chain(chain, inputs, stage: str, user_query: str):
+    try:
+        return chain.invoke(inputs)
+    except Exception as exc:
+        if _is_timeout_exception(exc):
+            _llm_timeout_warn(stage, user_query, exc)
+        raise
+
 # ==============================================================================
 # 🌐 API 接口 (供 api_server.py 调用)
 # ==============================================================================
@@ -601,6 +662,9 @@ def get_rag_components():
     if _rag_components:
         return _rag_components
     
+    print(f"🔧 [Internal] XINFERENCE_SERVER_URL={XINFERENCE_URL}")
+    print(f"🔧 [Internal] QDRANT_URL={QDRANT_URL}")
+    print(f"🔧 [Internal] LLM_BASE_URL={LLM_BASE_URL}")
     print("🔧 初始化 RAG 组件...")
     
     client = QdrantClient(url=QDRANT_URL)
@@ -621,9 +685,11 @@ def get_rag_components():
         )
     
     llm = ChatOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, model=LLM_MODEL_NAME,
-                     temperature=0.7, streaming=False, max_tokens=20480)
+                     temperature=0.7, streaming=False, max_tokens=20480,
+                     request_timeout=LLM_REQUEST_TIMEOUT)
     rewrite_llm = ChatOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, model=LLM_MODEL_NAME,
-                             temperature=0.0, streaming=False)
+                             temperature=0.0, streaming=False,
+                             request_timeout=LLM_REQUEST_TIMEOUT)
     
     reranker = XinferenceRerank(url=f"{XINFERENCE_URL.rstrip('/')}/v1/rerank",
                                 model_uid=RERANK_MODEL, top_n=20, request_timeout=240)
@@ -664,17 +730,37 @@ def process_single_query(user_query: str):
     
     # 执行查询流程
     print(f"\n🔍 [Internal] 开始处理查询: {user_query}")
-    intent = c['intent_chain'].invoke({"query": user_query}).strip().lower()
+    intent = _invoke_chain(
+        c['intent_chain'],
+        {"query": user_query},
+        stage="intent",
+        user_query=user_query
+    ).strip().lower()
     print(f"💡 [Internal] 识别意图: {intent}")
     
     combined_docs = []
-    dense_query = c['dense_rewrite_chain'].invoke({"question": user_query}).strip()
-    sparse_query = c['sparse_rewrite_chain'].invoke({"question": user_query}).strip()
-    alpha_raw = c['alpha_chain'].invoke({
-        "original": user_query,
-        "dense": dense_query,
-        "sparse": sparse_query
-    }).strip()
+    dense_query = _invoke_chain(
+        c['dense_rewrite_chain'],
+        {"question": user_query},
+        stage="dense_rewrite",
+        user_query=user_query
+    ).strip()
+    sparse_query = _invoke_chain(
+        c['sparse_rewrite_chain'],
+        {"question": user_query},
+        stage="sparse_rewrite",
+        user_query=user_query
+    ).strip()
+    alpha_raw = _invoke_chain(
+        c['alpha_chain'],
+        {
+            "original": user_query,
+            "dense": dense_query,
+            "sparse": sparse_query
+        },
+        stage="alpha",
+        user_query=user_query
+    ).strip()
     alpha = _parse_alpha(alpha_raw, default=0.35)
     print(f"🔄 [Internal] 语义重写 (JP): {dense_query}")
     print(f"🧩 [Internal] 关键词重写 (BM25): {sparse_query}")
@@ -725,9 +811,14 @@ def process_single_query(user_query: str):
     
     context_str = format_docs(combined_docs)
     answer_chunks = []
-    for chunk in c['answer_chain'].stream({"context": context_str, "original_question": user_query}):
-        answer_chunks.append(chunk)
-        yield chunk
+    try:
+        for chunk in c['answer_chain'].stream({"context": context_str, "original_question": user_query}):
+            answer_chunks.append(chunk)
+            yield chunk
+    except Exception as exc:
+        if _is_timeout_exception(exc):
+            _llm_timeout_warn("answer_stream", user_query, exc)
+        raise
     full_answer = "".join(answer_chunks)
     _maybe_trigger_onebot_tool(user_query, full_answer, combined_docs)
 

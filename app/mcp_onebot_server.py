@@ -29,6 +29,7 @@ ONEBOT_BASE64_PREFIX = os.getenv("ONEBOT_BASE64_PREFIX", "base64://")
 ONEBOT_PATH_MAP_FROM = os.getenv("ONEBOT_PATH_MAP_FROM", "").strip()
 ONEBOT_PATH_MAP_TO = os.getenv("ONEBOT_PATH_MAP_TO", "").strip()
 ONEBOT_TIMEOUT = float(os.getenv("ONEBOT_TIMEOUT", "10"))
+ONEBOT_DEBUG = os.getenv("ONEBOT_DEBUG", "0") == "1"
 
 
 def _parse_exts(raw_exts: str) -> list[str]:
@@ -46,6 +47,11 @@ def _parse_exts(raw_exts: str) -> list[str]:
 VOICE_EXTS = _parse_exts(ONEBOT_VOICE_EXTS)
 PATH_MAP_FROM = Path(ONEBOT_PATH_MAP_FROM).expanduser().resolve() if ONEBOT_PATH_MAP_FROM else None
 PATH_MAP_TO = Path(ONEBOT_PATH_MAP_TO) if ONEBOT_PATH_MAP_TO else None
+
+
+def _debug_log(message: str) -> None:
+    if ONEBOT_DEBUG:
+        print(f"[OneBot][DEBUG] {message}")
 
 
 def _is_within_base(path: Path, base: Path) -> bool:
@@ -136,13 +142,21 @@ def _onebot_headers() -> Dict[str, str]:
 
 def _onebot_post(action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{ONEBOT_BASE_URL}/{action.lstrip('/')}"
+    _debug_log(f"POST {url} payload={payload}")
     resp = requests.post(url, json=payload, headers=_onebot_headers(), timeout=ONEBOT_TIMEOUT)
     if resp.status_code >= 400:
         raise RuntimeError(f"OneBot HTTP error {resp.status_code}: {resp.text}")
     try:
-        return resp.json()
+        data = resp.json()
     except ValueError:
-        return {"ok": resp.ok, "status_code": resp.status_code, "text": resp.text}
+        raise RuntimeError(f"OneBot invalid JSON response: {resp.text}")
+    _debug_log(f"response status={resp.status_code} body={data}")
+    status = str(data.get("status", "")).lower()
+    retcode = data.get("retcode", 0)
+    if status not in ("ok", "") or retcode not in (0, "0"):
+        message = data.get("message") or data.get("wording") or data
+        raise RuntimeError(f"OneBot action '{action}' failed: status={status} retcode={retcode} msg={message}")
+    return data
 
 
 def _record_message(file_path: Path, caption: Optional[str]) -> list[Dict[str, Any]]:
